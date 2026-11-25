@@ -1,0 +1,31 @@
+<title>Odoo Helper</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/app.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<header class="topbar">
+  <a class="brand" href="#home"><span class="logo">OH</span><span data-i18n="appName">Odoo Helper</span></a>
+  <div class="topbar-right">
+    <label class="company-pick">
+      <span data-i18n="company">Company</span>
+      <select id="companySelect"></select>
+    </label>
+    <button id="langBtn" class="btn ghost" type="button">العربية</button>
+  </div>
+</header>
+<div class="layout">
+  <nav id="nav" class="nav"></nav>
+  <main id="main" class="main"></main>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="js/i18n.js"></script>
+<script src="js/store.js"></script>
+<script src="js/util.js"></script>
+<script src="js/masterdata.js"></script>
+<script src="js/bank.js"></script>
+<script src="js/app.js"></script>
