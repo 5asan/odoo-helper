@@ -278,6 +278,94 @@ const U = (() => {
     });
   }
 
-  return { esc, toast, uid, digits, parseNum, parseDate, fmtDate, fmtMoney, round2, norm, readFile, readSheet,
+  /* Searchable dropdown for a text input. Free typing is always allowed; picking an item fills the input
+     and fires 'change'. source = { items: () => [{value, sub}], empty: () => message when there are no items }. */
+  const AC = (() => {
+    let box = null, input = null, source = null, shown = [], active = -1;
+    const normCache = new WeakMap();
+    const keyOf = it => { let n = normCache.get(it); if (n == null) { n = norm(it.value + ' ' + (it.sub || '')); normCache.set(it, n); } return n; };
+
+    function ensure() {
+      if (box) return;
+      box = document.createElement('div');
+      box.className = 'ac-box';
+      box.setAttribute('role', 'listbox');
+      box.hidden = true;
+      document.body.appendChild(box);
+      box.addEventListener('mousedown', e => {
+        e.preventDefault();                       // keep focus in the input
+        const el = e.target.closest('[data-i]');
+        if (el) pick(+el.dataset.i);
+      });
+      window.addEventListener('scroll', place, true);
+      window.addEventListener('resize', place);
+    }
+    function place() {
+      if (!input || box.hidden) return;
+      if (!document.body.contains(input)) { close(); return; }
+      const r = input.getBoundingClientRect();
+      const width = Math.max(r.width, 280);
+      box.style.top = Math.round(r.bottom + 2) + 'px';
+      box.style.left = Math.round(Math.min(r.left, window.innerWidth - width - 8)) + 'px';
+      box.style.width = width + 'px';
+    }
+    function search(q) {
+      const list = source.items();
+      const nq = norm(q);
+      if (!nq) return list.slice(0, 50);
+      const starts = [], contains = [];
+      for (const it of list) {
+        const k = keyOf(it);
+        if (k.startsWith(nq) || norm(it.value).startsWith(nq)) starts.push(it);
+        else if (k.includes(nq)) contains.push(it);
+        if (starts.length >= 50) break;
+      }
+      return starts.concat(contains).slice(0, 50);
+    }
+    function render() {
+      const all = source.items();
+      if (!all.length) { box.innerHTML = `<div class="ac-empty">${esc(source.empty())}</div>`; return; }
+      if (!shown.length) { box.innerHTML = `<div class="ac-empty">${esc(t('ac_no_match'))}</div>`; return; }
+      box.innerHTML = shown.map((it, i) => `
+        <div class="ac-item${i === active ? ' active' : ''}" data-i="${i}" role="option" aria-selected="${i === active}">
+          <span dir="auto">${esc(it.value)}</span>${it.sub ? `<small dir="auto">${esc(it.sub)}</small>` : ''}
+        </div>`).join('');
+      const a = box.querySelector('.active');
+      if (a) a.scrollIntoView({ block: 'nearest' });
+    }
+    function open() {
+      ensure();
+      shown = search(input.value);
+      active = -1;
+      render();
+      box.hidden = false;
+      place();
+    }
+    function close() { if (box) box.hidden = true; active = -1; }
+    function pick(i) {
+      const it = shown[i];
+      if (!it || !input) return;
+      input.value = it.value;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      close();
+    }
+    function attach(el, src) {
+      el.setAttribute('autocomplete', 'off');
+      el.setAttribute('role', 'combobox');
+      el.addEventListener('focus', () => { input = el; source = src; open(); });
+      el.addEventListener('input', () => { input = el; source = src; open(); });
+      el.addEventListener('blur', () => setTimeout(() => { if (input === el) close(); }, 120));
+      el.addEventListener('keydown', e => {
+        if (!box || box.hidden) { if (e.key === 'ArrowDown') { input = el; source = src; open(); e.preventDefault(); } return; }
+        if (e.key === 'ArrowDown') { active = Math.min(active + 1, shown.length - 1); render(); e.preventDefault(); }
+        else if (e.key === 'ArrowUp') { active = Math.max(active - 1, -1); render(); e.preventDefault(); }
+        else if (e.key === 'Enter') { if (active >= 0) { pick(active); e.preventDefault(); } else close(); }
+        else if (e.key === 'Escape' || e.key === 'Tab') close();
+      });
+    }
+    return { attach };
+  })();
+
+  return { attachAutocomplete: AC.attach, esc, toast, uid, digits, parseNum, parseDate, fmtDate, fmtMoney, round2, norm, readFile, readSheet,
     download, downloadCSV, downloadXLSX, safeName, dropZone, ask, copyDialog, toTSV };
 })();

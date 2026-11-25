@@ -537,13 +537,12 @@ const Bank = (() => {
             <td class="muted">${i + 1}</td>
             <td class="date-cell"><input data-f="date" type="date" value="${r.date}"></td>
             <td class="label-cell"><input data-f="label" dir="auto" value="${U.esc(r.label)}"></td>
-            <td class="partner-cell"><input data-f="partner" dir="auto" list="bkContacts" value="${U.esc(r.partner)}"></td>
+            <td class="partner-cell"><input data-f="partner" dir="auto" placeholder="—" value="${U.esc(r.partner)}"></td>
             <td class="num"><input data-f="amount" class="num ${r.amount < 0 ? 'neg' : 'pos'}" value="${fx(r.amount)}"></td>
             <td class="num"><input data-f="balance" class="num" value="${r.balance == null ? '' : fx(r.balance)}"></td>
             <td><button class="icon-btn" data-del="${i}" title="${t('remove_row')}" aria-label="${t('remove_row')}" type="button">✕</button></td>
           </tr>`).join('')}</tbody>
-      </table></div>
-      <datalist id="bkContacts">${App.data.contacts.slice(0, 5000).map(c => `<option value="${U.esc(c.name)}">`).join('')}</datalist>`;
+      </table></div>`;
   }
 
   function renderRaw() {
@@ -601,6 +600,16 @@ const Bank = (() => {
     if (flip) flip.addEventListener('click', () => {
       settings.debitPositive = !settings.debitPositive; saveSettings(); build(); App.rerender();
     });
+  }
+
+  // Contacts as dropdown items (name + Tax ID / reference), rebuilt only when the contact list changes.
+  let ciFor = null, ciList = [];
+  function contactItems() {
+    if (ciFor !== App.data.contacts) {
+      ciFor = App.data.contacts;
+      ciList = ciFor.map(c => ({ value: c.name, sub: [c.vat, c.ref].filter(Boolean).join(' · ') }));
+    }
+    return ciList;
   }
 
   function recalcMismatch() {
@@ -661,6 +670,10 @@ const Bank = (() => {
     });
     wireFlip(root);
 
+    // Partner: searchable list of this company's Contacts; typing a name that is not in the list is allowed.
+    const partnerSource = { items: contactItems, empty: () => t('ac_no_contacts') };
+    root.querySelectorAll('tbody input[data-f="partner"]').forEach(inp => U.attachAutocomplete(inp, partnerSource));
+
     root.querySelectorAll('tbody input[data-f]').forEach(inp => inp.addEventListener('change', () => {
       const tr = inp.closest('tr'); const r = st.rows[+tr.dataset.i]; const f = inp.dataset.f;
       if (f === 'amount' || f === 'balance') {
@@ -669,7 +682,7 @@ const Bank = (() => {
         if (f === 'amount') inp.className = 'num ' + (r.amount < 0 ? 'neg' : 'pos');
       } else r[f] = inp.value;
       recalcMismatch();
-      root.querySelectorAll('tbody tr').forEach(row => row.classList.toggle('mismatch', st.rows[+row.dataset.i].mismatch));
+      root.querySelectorAll('tbody tr[data-i]').forEach(row => row.classList.toggle('mismatch', st.rows[+row.dataset.i].mismatch));
       refreshSummary(root);
     }));
     root.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => {
