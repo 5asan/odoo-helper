@@ -192,3 +192,15 @@ details.card[open] > summary { margin-bottom: 12px; }
 .list-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .list-item:last-child { border-bottom: 0; }
 .ltr { direction: ltr; unicode-bidi: isolate; }
+
+/* GL Analysis */
+.gl-group { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--surface); }
+.gl-group > summary { cursor: pointer; padding: 10px 12px; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.gl-group[open] > summary { border-bottom: 1px solid var(--border); }
+.gl-text { font-weight: 600; overflow-wrap: anywhere; }
+.gl-accs { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; }
+.gl-acc { font-size: 12px; padding: 2px 8px; border-radius: 6px; background: var(--ok-soft); color: var(--text); }
+.gl-acc.odd { background: var(--warn-soft); }
+.gl-acc b { font-variant-numeric: tabular-nums; }
+.gl-body { padding: 10px 12px; }
+.gl-body:empty { display: none; }
