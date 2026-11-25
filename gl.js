@@ -96,7 +96,12 @@ const GL = (() => {
       const idx = headers.findIndex((h, i) => !used.has(i) && h && f.re.test(h.trim()));
       map[f.k] = idx; if (idx >= 0) used.add(idx);
     }
-    // Odoo's General Ledger report has an unnamed first column holding the entry number.
+    // Odoo's General Ledger report: under each account title row, the "Account Name" column holds the entry number.
+    if (map.account >= 0 && map.move < 0 && map.date >= 0) {
+      const vals = data.slice(0, 500).filter(r => U.parseDate(r[map.date] || '')).map(r => r[map.account] || '').filter(Boolean);
+      if (vals.length >= 3 && vals.filter(v => MOVE_RE.test(v)).length / vals.length >= 0.6) { map.move = map.account; map.account = -1; }
+    }
+    // Some versions have an unnamed first column holding the entry number.
     if (map.move < 0) {
       const sample = data.slice(0, 300);
       const width = Math.max(headers.length, ...sample.map(r => r.length));
@@ -133,7 +138,14 @@ const GL = (() => {
       const first = r.find(c => c) || '';
       if (SKIP_RE.test(first) || SKIP_RE.test(cell(r, 'label'))) continue;
       const date = map.date >= 0 ? U.parseDate(cell(r, 'date'), order) : null;
-      if (map.account < 0 && !date && ACC_ROW_RE.test(first)) { curAcc = first.trim(); accRows++; continue; }
+      if (map.account < 0 && !date) {
+        // Account title row: "1010101 Bank" in one cell, or the code and name in two cells.
+        const amtCols = new Set([map.debit, map.credit, map.amount]);
+        const title = r.filter((c, i) => c && !amtCols.has(i)).slice(0, 2).map(c => String(c).trim());
+        const one = title[0] || '', two = title.join(' ');
+        if (ACC_ROW_RE.test(one)) { curAcc = one; accRows++; continue; }
+        if (/^[\w.\-]*\d[\w.\-]*$/.test(one) && title.length === 2 && ACC_ROW_RE.test(two)) { curAcc = two; accRows++; continue; }
+      }
       if (map.date >= 0 && !date) continue;
       let debit = 0, credit = 0;
       const dc = cell(r, 'debit') + ' ' + cell(r, 'credit');
