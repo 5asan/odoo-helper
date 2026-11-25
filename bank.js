@@ -10,7 +10,7 @@ const Bank = (() => {
     ['balance', /balance|رصيد/i],
     ['debit', /debit|withdraw|paid out|money out|^dr\.?$|مدين|سحب|مسحوب|خصم/i],
     ['credit', /credit|deposit|paid in|money in|^cr\.?$|دائن|إيداع|ايداع/i],
-    ['amount', /^amount\b|^المبلغ|^مبلغ/i],
+    ['amount', /\bamount\b|المبلغ|مبلغ/i],   // "Transaction Amount" too; Debit/Credit Amount are caught above
     ['ref', /ref|cheque|chq|check no|المرجع|مرجع|شيك/i],
     ['label', /descr|detail|narrat|particular|transaction|remark|memo|البيان|بيان|الوصف|التفاصيل|تفاصيل|شرح/i],
     ['partner', /beneficiary|counterparty|payee|partner|المستفيد|الطرف/i],
@@ -141,27 +141,43 @@ const Bank = (() => {
   }
 
   function linesToRaw(lines) {
-    const hi = lines.findIndex(l => isHeaderCells(l.cells.map(c => c.str)));
+    // Header search: first on merged cells; if columns sit so close that merging glued them together,
+    // on the PDF's own text pieces (merging only pieces that touch, like split words).
+    const tightCells = L => {
+      const out = [];
+      for (const it of L.items) {
+        const s = it.str.trim(); if (!s) continue;
+        const last = out[out.length - 1];
+        if (last && it.x - last.x1 < Math.max(it.h, 4) * 0.35) { last.str += (it.x - last.x1 > Math.max(it.h, 4) * 0.12 ? ' ' : '') + s; last.x1 = it.x + it.w; }
+        else out.push({ str: s, x0: it.x, x1: it.x + it.w });
+      }
+      return out;
+    };
+    let useTight = false;
+    let hi = lines.findIndex(l => isHeaderCells(l.cells.map(c => c.str)));
+    if (hi < 0) { hi = lines.findIndex(l => isHeaderCells(tightCells(l).map(c => c.str))); useTight = hi >= 0; }
+    const cellsOf = L => (useTight ? tightCells(L) : L.cells);
+    const textOf = L => cellsOf(L).map(c => c.str).join('|');
     let cols, startIdx = 0;
     const headerTexts = new Set();
     if (hi >= 0) {
       // Headers can sit on two lines ("Transaction" above, "Date" below): merge nearby header lines.
       const H = lines[hi], hh = H.h || 8;
-      const hdr = H.cells.map(c => ({ x0: c.x0, x1: c.x1, header: c.str }));
+      const hdr = cellsOf(H).map(c => ({ x0: c.x0, x1: c.x1, header: c.str }));
       let last = hi;
-      headerTexts.add(H.cells.map(c => c.str).join('|'));
+      headerTexts.add(textOf(H));
       for (let j = Math.max(0, hi - 2); j <= Math.min(lines.length - 1, hi + 2); j++) {
         const L = lines[j];
         if (j === hi || L.page !== H.page || Math.abs(L.y - H.y) > hh * 1.3) continue;
-        if (L.cells.some(c => U.parseDate(c.str) || U.parseNum(c.str))) continue;   // a data line, not a header
-        for (const c of L.cells) {
+        if (cellsOf(L).some(c => U.parseDate(c.str) || U.parseNum(c.str))) continue;   // a data line, not a header
+        for (const c of cellsOf(L)) {
           const col = hdr.find(h => c.x0 < h.x1 && c.x1 > h.x0);
           if (col) {
             col.header = L.y < H.y ? c.str + ' ' + col.header : col.header + ' ' + c.str;
             col.x0 = Math.min(col.x0, c.x0); col.x1 = Math.max(col.x1, c.x1);
           } else hdr.push({ x0: c.x0, x1: c.x1, header: c.str });
         }
-        headerTexts.add(L.cells.map(c => c.str).join('|'));
+        headerTexts.add(textOf(L));
         last = Math.max(last, j);
       }
       cols = spansFrom(hdr);
@@ -172,7 +188,7 @@ const Bank = (() => {
     const rows = [];
     for (let i = startIdx; i < lines.length; i++) {
       const L = lines[i];
-      if (headerTexts.has(L.cells.map(c => c.str).join('|'))) continue; // repeated header on later pages
+      if (headerTexts.has(textOf(L))) continue; // repeated header on later pages
       // Place each piece by where it starts (text) or ends (right-aligned amounts),
       // so text overflowing into the next column stays in its own column.
       const cells = cols.map(() => '');
@@ -299,7 +315,11 @@ const Bank = (() => {
     // Summary lines ("Total Debit Amount", "إجمالي", …) or non-date text in the Date column are not transaction lines.
     const isSummary = row => {
       const c = row.cells;
-      return c.some((v, i) => !labelIdx.includes(i) && TOTAL_RE.test(v || '')) || (!!(c[di] || '').trim() && !dateOf(row));
+      if (dateOf(row)) return false;            // a dated line is a transaction, whatever its text says
+      const hasFullAmount = c.some(v => v && COMPLETE.test(v.trim()) && U.parseNum(v));
+      // "Total…" in a description column counts only when the line also carries an amount (not "Total Fitness LLC").
+      return c.some((v, i) => TOTAL_RE.test(v || '') && (!labelIdx.includes(i) || hasFullAmount)) ||
+        (!!(c[di] || '').trim() && !dateOf(row));
     };
     const tryOpening = row => {
       if (!groups.length && balI >= 0 && OPENING_RE.test(row.cells.join(' ')) && U.parseNum(row.cells[balI])) {
@@ -373,6 +393,17 @@ const Bank = (() => {
     const found = groups.map(g => {
       const f = { date: g.date, label: '', ref: '', partner: '', raw: {} };
       for (const [k, i] of NUMK) f.raw[k] = i >= 0 ? (g.dateRow.cells[i] || '').trim() : '';
+      // Some banks print the amount/balance on another line of the transaction (not the date line):
+      // take the first full amount found in the transaction's other lines.
+      const hasAmount = () => ['deb', 'cre', 'amt'].some(k => U.parseNum(f.raw[k]));
+      for (const r of g.rows) {
+        if (r === g.dateRow) continue;
+        for (const [k, i] of NUMK) {
+          if (i < 0 || f.raw[k] || (k !== 'bal' && hasAmount())) continue;
+          const v = (r.cells[i] || '').trim();
+          if (v && COMPLETE.test(v) && U.parseNum(v)) f.raw[k] = v;
+        }
+      }
       let after = false;
       for (const r of g.rows) {
         const c = r.cells;
