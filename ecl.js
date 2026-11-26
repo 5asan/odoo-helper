@@ -10,13 +10,15 @@ const AgedECL = (() => {
   const WEIGHTS = [1, 2, 3, 4, 5, 0];
   const ALLOW_RE = /allowance|expected credit|doubtful|impairment|\becl\b|مخصص|خسائر ائتمانية/i;
   const DAY = 864e5;
+  // Odoo's opening entry (migrated balances): its lines say "Opening Balance(s)".
+  const OPENING_RE = /opening balance|رصيد افتتاحي|الرصيد الافتتاحي|الأرصدة الافتتاحية/i;
 
   const st = { coId: null, files: [], busy: '', error: '', model: null, tab: 'aged' };
 
   /* ---------- Settings (per company) ---------- */
   const SKEY = 'oh_ecl_settings';
   const loadAll = () => { try { return JSON.parse(localStorage.getItem(SKEY) || '{}'); } catch (e) { return {}; } };
-  const cfg = () => Object.assign({ year: '', start: 2022, exclude: [], rates: { inf: 0, ind: 0, unemp: 0 }, hist: {}, allow: '', manualProv: '' },
+  const cfg = () => Object.assign({ year: '', start: 2022, exclude: [], rates: { inf: 0, ind: 0, unemp: 0 }, hist: {}, allow: '', manualProv: '', openOld: true },
     loadAll()[App.companyId] || {});
   function saveCfg(c) {
     const all = loadAll(); all[App.companyId] = c;
@@ -54,11 +56,11 @@ const AgedECL = (() => {
           open[0].amt -= Math.sign(open[0].amt) * take;
           if (!open[0].amt) open.shift();
         }
-        if (v) open.push({ date: l.date, move: l.move, label: l.label, amt: v });
+        if (v) open.push({ date: l.date, move: l.move, label: l.label, amt: v, old: l.old });
       }
       if (!open.length) continue;
       const bands = new Array(NB).fill(0);
-      for (const it of open) { it.band = bandOf(Math.round((end - Date.parse(it.date + 'T00:00:00Z')) / DAY)); bands[it.band] += it.amt; }
+      for (const it of open) { it.band = it.old ? NB - 1 : bandOf(Math.round((end - Date.parse(it.date + 'T00:00:00Z')) / DAY)); bands[it.band] += it.amt; }
       rows.push({ code: g.code, p: g.p, bands, total: bands.reduce((s, x) => s + x, 0), items: open });
     }
     rows.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }) || (a.p === NOP()) - (b.p === NOP()) || a.p.localeCompare(b.p));
@@ -94,7 +96,11 @@ const AgedECL = (() => {
         lines.push({ n: lines.length, date, code: l.code, p: NOP(), v, move: t('ecl_init_move'), label: '' });
       }
     }
-    for (const f of gls) for (const l of f.lines) lines.push({ n: lines.length, date: l.date, code: l.code, p: l.p, v: toInt(l.d) - toInt(l.c), move: l.move || '', label: l.label || '' });
+    for (const f of gls) for (const l of f.lines) {
+      const old = c.openOld !== false && OPENING_RE.test(l.label || '');
+      lines.push({ n: lines.length, date: l.date, code: l.code, p: l.p, v: toInt(l.d) - toInt(l.c), move: l.move || '', label: l.label || '', old });
+    }
+    const openCount = lines.filter(l => OPENING_RE.test(l.label)).length;
     const dates = gls.flatMap(f => [f.from, f.to]).sort();
     const glFrom = dates[0], glTo = dates[dates.length - 1];
     const years = [];
@@ -102,7 +108,7 @@ const AgedECL = (() => {
     const year = years.includes(c.year) ? c.year : years[years.length - 1];
     const asOf = `${year}-12-31`;
 
-    const m = { dec, UNIT, names, lines, glFrom, glTo, years, year, asOf, gls, tbs, initTotal, agingCache: {} };
+    const m = { dec, UNIT, names, lines, glFrom, glTo, years, year, asOf, gls, tbs, initTotal, openCount, agingCache: {} };
     const all = aging(m, asOf);
     const codes = [...new Set(lines.map(l => l.code))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     m.accounts = codes.map(code => {
@@ -242,6 +248,7 @@ const AgedECL = (() => {
           <label class="field">${t('ecl_ind')}<input data-rate="ind" type="number" step="0.01" value="${m.rates.ind}" style="width:90px"></label>
           <label class="field">${t('ecl_unemp')}<input data-rate="unemp" type="number" step="0.01" value="${m.rates.unemp}" style="width:90px"></label>
         </div>
+        <label class="row" style="gap:8px;margin-top:12px"><input type="checkbox" id="eclOpenOld" ${c.openOld !== false ? 'checked' : ''}> ${t('ecl_open_old', { n: m.openCount })}</label>
         <h3 style="margin:14px 0 6px">${t('ecl_accounts')}</h3>
         <p class="muted small" style="margin:0 0 6px">${t('ecl_accounts_hint')}</p>
         ${m.accounts.map(a => `
@@ -537,6 +544,7 @@ const AgedECL = (() => {
 
     const change = (el, fn) => el && el.addEventListener('change', () => { const c = cfg(); fn(c, el); saveCfg(c); App.rerender(); });
     change(q('#eclYear'), (c, el) => { c.year = el.value; });
+    change(q('#eclOpenOld'), (c, el) => { c.openOld = el.checked; });
     change(q('#eclStart'), (c, el) => { c.start = +el.value || 2022; });
     root.querySelectorAll('[data-rate]').forEach(el => change(el, (c, e) => { c.rates = Object.assign({}, c.rates, { [e.dataset.rate]: +e.value || 0 }); }));
     root.querySelectorAll('[data-acc]').forEach(el => change(el, (c, e) => {
