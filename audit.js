@@ -511,6 +511,9 @@ const Audit = (() => {
     return `
       <div class="card">
         <div class="row" style="margin-bottom:10px">
+          <select id="auDlYear" title="${U.esc(t('au_dl_which'))}">
+            <option value="all">${t('au_dl_all')}</option>
+            ${m.years.map(y => `<option value="${y}" ${st.dlYear === y ? 'selected' : ''}>${y}</option>`).join('')}</select>
           <button class="btn" id="auXlsx" type="button">${t('au_download')}</button>
           ${m.tbs.length ? `<span class="badge ${bad ? 'bad' : 'ok'}">${bad ? t('au_check_bad', { n: bad }) : t('au_check_ok')}</span>` : `<span class="muted small">${t('au_check_hint')}</span>`}
         </div>
@@ -700,9 +703,13 @@ const Audit = (() => {
     if (btn) btn.disabled = false;
     const wb = X.utils.book_new();
     let last = null;
-    for (const y of m.years) { const { ws, aoa } = yearSheet(m, y, X); X.utils.book_append_sheet(wb, ws, y); last = aoa; }
-    if (m.tbs.length) X.utils.book_append_sheet(wb, checkSheet(m, X), t('au_check_sheet').slice(0, 31));
-    const yrs = m.years.length > 1 ? `${m.years[0]}-${m.years[m.years.length - 1]}` : m.years[0];
+    const one = m.years.includes(st.dlYear) ? st.dlYear : null;
+    const years = one ? [one] : m.years;
+    for (const y of years) { const { ws, aoa } = yearSheet(m, y, X); X.utils.book_append_sheet(wb, ws, y); last = aoa; }
+    // The Odoo TB check goes with the year the TB belongs to.
+    const tbs = one ? m.tbs.filter(tb => String(tb.to).slice(0, 4) === one) : m.tbs;
+    if (tbs.length) X.utils.book_append_sheet(wb, checkSheet(Object.assign({}, m, { tbs }), X), t('au_check_sheet').slice(0, 31));
+    const yrs = years.length > 1 ? `${years[0]}-${years[years.length - 1]}` : years[0];
     const name = `TB-by-Partner-${U.safeName(App.company().name)}-${yrs}.xlsx`;
     const res = await U.download(name, new Uint8Array(X.write(wb, { type: 'array', bookType: 'xlsx' })));
     if (String(res).startsWith('unavailable')) {
@@ -754,6 +761,7 @@ const Audit = (() => {
       const s2 = document.getElementById('auSearch'); if (s2) { s2.focus(); s2.setSelectionRange(pos, pos); }
     });
     const xl = q('#auXlsx'); if (xl) xl.addEventListener('click', exportXlsx);
+    const dy = q('#auDlYear'); if (dy) dy.addEventListener('change', () => { st.dlYear = dy.value; });
   }
 
   /* ---------- Page: pick a report ---------- */
