@@ -55,7 +55,7 @@ const App = {
     const items = [
       ['home', 'nav_home'], null,
       ['bank', 'nav_bank', true], ['bills', 'nav_bills'],
-      ['recon', 'nav_recon'], ['gl', 'nav_gl', true], null,
+      ['recon', 'nav_recon'], ['gl', 'nav_gl', true], ['audit', 'nav_audit', true], null,
       ['master', 'nav_master', true], ['companies', 'nav_companies', true],
     ];
     document.getElementById('nav').innerHTML = items.map(it => it ? `
@@ -100,6 +100,7 @@ const Home = {
       <div class="grid">
         ${f('bank', 'nav_bank', 'f_bank', true)}
         ${f('gl', 'nav_gl', 'f_gl', true)}
+        ${f('audit', 'nav_audit', 'f_audit', true)}
         ${f('master', 'nav_master', 'f_master', true)}
         ${f('companies', 'nav_companies', 'f_companies', true)}
         ${f('bills', 'nav_bills', 'f_bills', false)}
@@ -213,6 +214,7 @@ const Views = {
   bills: comingSoon('nav_bills', 'soon_bills'),
   recon: comingSoon('nav_recon', 'soon_recon'),
   gl: GL,
+  audit: Audit,
 };
 
 App.init();

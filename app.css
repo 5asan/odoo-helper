@@ -215,3 +215,16 @@ details.card[open] > summary { margin-bottom: 12px; }
 .gl-check.active { outline: 2px solid var(--brand); outline-offset: -1px; }
 .gl-check-n { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .gl-check-t { font-weight: 600; font-size: 13px; }
+
+/* Audit Reports */
+.au-how { margin: 10px 0 0; padding-inline-start: 18px; }
+.au-how li { margin: 3px 0; }
+.au-table tr.au-group td { background: var(--brand-soft); font-weight: 600; }
+.au-table tr.au-acc td { font-weight: 600; background: var(--surface-2); }
+.au-table tr.au-part td { color: var(--text); }
+.au-table tr.au-part td:nth-child(3) { padding-inline-start: 22px; }
+.au-table tr.au-total td { font-weight: 700; border-top: 2px solid var(--text); position: sticky; bottom: 0; background: var(--surface); }
+.au-table thead tr:nth-child(2) th { top: 31px; }
+.au-table table { min-width: 1150px; }
+.au-table tr.au-part td:nth-child(3) { min-width: 240px; }
+.au-table td[colspan] { min-width: 300px; }
