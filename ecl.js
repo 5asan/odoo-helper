@@ -105,10 +105,14 @@ const AgedECL = (() => {
     const glFrom = dates[0], glTo = dates[dates.length - 1];
     const years = [];
     for (let y = +glFrom.slice(0, 4); y <= +glTo.slice(0, 4); y++) years.push(String(y));
-    const year = years.includes(c.year) ? c.year : years[years.length - 1];
+    // Last year's ECL file as given to the auditor: its history, rates and ECL are the basis for this year.
+    const prevF = st.files.find(f => f.kind === 'eclprev');
+    const prev = prevF ? prevF.reports[prevF.sel || 0] : null;
+    const next = prev ? String(+prev.year + 1) : '';
+    const year = years.includes(c.year) ? c.year : years.includes(next) ? next : years[years.length - 1];
     const asOf = `${year}-12-31`;
 
-    const m = { dec, UNIT, names, lines, glFrom, glTo, years, year, asOf, gls, tbs, initTotal, openCount, agingCache: {} };
+    const m = { dec, UNIT, names, lines, glFrom, glTo, years, year, asOf, gls, tbs, initTotal, openCount, prev, prevFile: prevF && prevF.name, agingCache: {} };
     const all = aging(m, asOf);
     const codes = [...new Set(lines.map(l => l.code))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     m.accounts = codes.map(code => {
@@ -125,11 +129,14 @@ const AgedECL = (() => {
     m.baseTotals = sumBands(m.base);
 
     // History: one row per year-end from the start year to the current year.
-    const start = Math.min(+c.start || +year, +year);
+    // Years in last year's ECL file are taken exactly as reported to the auditor.
+    const prevYears = prev ? Object.keys(prev.hist).sort() : [];
+    const start = Math.min(prevYears.length ? +prevYears[0] : +c.start || +year, +year);
     m.hist = [];
     for (let y = start; y <= +year; y++) {
       const ys = String(y);
       if (ys === year) { m.hist.push({ year: ys, src: 'current', v: m.baseTotals }); continue; }
+      if (prev && prev.hist[ys]) { m.hist.push({ year: ys, src: 'prior', v: prev.hist[ys].map(toInt) }); continue; }
       const canGL = glFrom <= `${ys}-01-01`;
       const h = c.hist[ys] || {};
       const src = h.src || (canGL ? 'gl' : 'manual');
@@ -160,7 +167,18 @@ const AgedECL = (() => {
     const pick = m.allowOptions.find(o => o.id === c.allow) || m.allowOptions.find(o => o.code === c.allow.split('|')[1] && o.guess)
       || m.allowOptions.find(o => o.guess && o.end === asOf) || m.allowOptions.find(o => o.guess);
     m.allow = c.allow === 'manual' ? null : pick || null;
-    m.recorded = m.allow ? -m.allow.cb : toInt(+c.manualProv || 0);
+    m.tbAllow = m.allow ? -m.allow.cb : null;
+    if (prev) {
+      // Opening provision = last year's ECL as reported; the TB allowance is only a check.
+      m.recorded = toInt(prev.ecl);
+      m.allowDiff = m.tbAllow != null && Math.abs(m.tbAllow - m.recorded) > 1;
+      // Does last year's reported aging agree with what the GL gives for that year-end?
+      if (glFrom <= `${prev.year}-01-01` && prev.hist[prev.year]) {
+        const gl = sumBands(aging(m, `${prev.year}-12-31`).filter(r => on.has(r.code) && r.total > 0)).reduce((s, x) => s + x, 0);
+        const rep = prev.hist[prev.year].reduce((s, x) => s + toInt(x), 0);
+        if (Math.abs(gl - rep) > 1) m.prevCheck = { year: prev.year, gl, rep };
+      }
+    } else m.recorded = m.allow ? -m.allow.cb : toInt(+c.manualProv || 0);
     m.required = m.eclTotal - m.recorded;
 
     // Does the aging agree with the Trial Balance?
@@ -173,6 +191,47 @@ const AgedECL = (() => {
   }
   const model = () => st.model || (st.model = build());
 
+  /* ---------- Last year's ECL working file (the company's own sheet, or the one made here) ---------- */
+  const PREV_RE = {
+    year: /^(year|السنة)$/i,
+    ecl: /ecl required|المخصص المطلوب حسب/i,
+    inf: /inflation|التضخم/i, ind: /industry|القطاع/i, unemp: /unemployment|البطالة/i,
+  };
+  // Every sheet with a "Year" history table and an "ECL required" row is one report (e.g. Dubai and Kuwait).
+  function parsePrevECL(sheets) {
+    const out = [];
+    for (const s of sheets) {
+      const rows = s.rows;
+      const val = (r, i) => { const v = r.v && r.v[i]; if (typeof v === 'number') return v; const p = U.parseNum(r[i]); return p ? p.v : null; };
+      const label = r => String(r[0] || '').replace(/\s+/g, ' ').trim();
+      const hi = rows.findIndex(r => PREV_RE.year.test(label(r)));
+      if (hi < 0) continue;
+      const hist = {};
+      for (let i = hi + 1; i < rows.length; i++) {
+        const y = label(rows[i]);
+        if (!/^(19|20)\d{2}$/.test(y)) break;
+        hist[y] = Array.from({ length: NB }, (_, k) => val(rows[i], 1 + k) || 0);
+      }
+      const years = Object.keys(hist).sort();
+      const eclRow = rows.find(r => PREV_RE.ecl.test(label(r)));
+      if (!years.length || !eclRow) continue;
+      let ecl = null;   // the row's total = its last number
+      for (let i = 1; i < Math.max(eclRow.length, (eclRow.v || []).length); i++) { const x = val(eclRow, i); if (x != null && isFinite(x)) ecl = x; }
+      if (ecl == null) continue;
+      const rate = re => { const r = rows.find(x => re.test(label(x))); const x = r ? val(r, 1) : null; return x == null ? 0 : Math.abs(x) <= 1 ? +(x * 100).toFixed(4) : x; };
+      out.push({ sheet: s.name, year: years[years.length - 1], hist, ecl, rates: { inf: rate(PREV_RE.inf), ind: rate(PREV_RE.ind), unemp: rate(PREV_RE.unemp) } });
+    }
+    return out;
+  }
+
+  // Take last year's forward-looking rates as this year's starting point (they can still be changed).
+  function adoptPrev(f) {
+    const p = f.reports[f.sel || 0], c = cfg();
+    c.rates = Object.assign({}, p.rates);
+    c.year = String(+p.year + 1);
+    saveCfg(c);
+  }
+
   /* ---------- Files ---------- */
   async function onFiles(list) {
     st.error = '';
@@ -181,9 +240,13 @@ const AgedECL = (() => {
       await new Promise(r => setTimeout(r, 30));
       try {
         if (/\.pdf$/i.test(file.name)) throw new Error(t('au_need_excel'));
-        const parsed = Audit.io.classify(await Audit.io.readBook(file));
-        st.files = st.files.filter(f => f.name !== file.name);
-        st.files.push(Object.assign({ id: U.uid(), name: file.name }, parsed));
+        const sheets = await Audit.io.readBook(file);
+        const reports = parsePrevECL(sheets);
+        const parsed = reports.length ? { kind: 'eclprev', reports, sel: 0 } : Audit.io.classify(sheets);
+        st.files = st.files.filter(f => f.name !== file.name && !(parsed.kind === 'eclprev' && f.kind === 'eclprev'));
+        const f = Object.assign({ id: U.uid(), name: file.name }, parsed);
+        st.files.push(f);
+        if (f.kind === 'eclprev') adoptPrev(f);
       } catch (e) { st.error = `${file.name}: ${e.message || e}`; }
     }
     st.busy = ''; st.model = null;
@@ -207,7 +270,7 @@ const AgedECL = (() => {
           <div class="drop" id="eclDrop" tabindex="0" role="button">
             <b>${t('au_drop')}</b><span class="muted">${t('ecl_drop_sub')}</span>
           </div>
-          <ul class="muted small au-how">${['ecl_how1', 'ecl_how2', 'ecl_how3'].map(k => `<li>${t(k)}</li>`).join('')}</ul>`}
+          <ul class="muted small au-how">${['ecl_how1', 'ecl_how4', 'ecl_how2', 'ecl_how3'].map(k => `<li>${t(k)}</li>`).join('')}</ul>`}
         <input type="file" id="eclFile" accept=".xlsx,.xls,.csv" multiple hidden>
       </div>
       ${st.busy ? `<div class="card"><span class="spinner"></span> ${U.esc(t('reading', { f: st.busy }))}</div>` : ''}
@@ -216,13 +279,18 @@ const AgedECL = (() => {
   }
 
   function renderFiles(m) {
+    const prevDesc = p => t('ecl_k_prev_d', { y: p.year, a: Object.keys(p.hist).sort()[0], e: p.ecl.toLocaleString('en-US', { maximumFractionDigits: 3 }) });
     const desc = f => (f.kind === 'gl' ? t('au_k_gl_d', { n: f.lines.length.toLocaleString('en-US'), a: fd(f.from), b: fd(f.to) })
-      : f.kind === 'tb' ? t('au_k_tb_d', { a: fd(f.from), b: fd(f.to), n: f.accounts.length }) : t('ecl_k_ours_d', { y: f.year }));
+      : f.kind === 'tb' ? t('au_k_tb_d', { a: fd(f.from), b: fd(f.to), n: f.accounts.length })
+      : f.kind === 'eclprev' ? prevDesc(f.reports[f.sel || 0]) : t('ecl_k_ours_d', { y: f.year }));
+    const badge = f => (f.kind === 'gl' ? ['ok', 'ecl_k_gl'] : f.kind === 'eclprev' ? ['soon', 'ecl_k_prev'] : ['warn', 'ecl_k_tb']);
     return `
       ${st.files.map(f => `
         <div class="list-item">
-          <span class="badge ${f.kind === 'gl' ? 'ok' : 'warn'}">${t(f.kind === 'gl' ? 'ecl_k_gl' : 'ecl_k_tb')}</span>
+          <span class="badge ${badge(f)[0]}">${t(badge(f)[1])}</span>
           <b>${U.esc(f.name)}</b><span class="muted small">${U.esc(desc(f))}</span>
+          ${f.kind === 'eclprev' && f.reports.length > 1 ? `<select data-prevsheet="${f.id}" title="${U.esc(t('ecl_prev_sheet'))}">
+            ${f.reports.map((p, i) => `<option value="${i}" ${i === (f.sel || 0) ? 'selected' : ''}>${U.esc(p.sheet)}</option>`).join('')}</select>` : ''}
           <span class="spacer"></span>
           <button class="btn ghost sm" data-rm="${f.id}" type="button">${t('au_remove')}</button>
         </div>`).join('')}
@@ -231,7 +299,9 @@ const AgedECL = (() => {
         <button class="btn ghost" id="eclReset" type="button">${t('au_reset')}</button>
       </div>
       ${m.empty ? `<div class="notice warn" style="margin-top:10px">${t('ecl_need_gl')}</div>` : ''}
-      ${!m.empty && m.initTotal ? `<div class="notice warn" style="margin-top:10px">${t('ecl_init_warn', { v: money(m.initTotal, m), d: fd(m.glFrom) })}</div>` : ''}`;
+      ${!m.empty && m.initTotal ? `<div class="notice warn" style="margin-top:10px">${t('ecl_init_warn', { v: money(m.initTotal, m), d: fd(m.glFrom) })}</div>` : ''}
+      ${!m.empty && m.prev && m.prev.year >= m.year ? `<div class="notice warn" style="margin-top:10px">${t('ecl_prev_year_warn', { y: m.prev.year })}</div>` : ''}
+      ${!m.empty && m.prevCheck ? `<div class="notice info" style="margin-top:10px">${t('ecl_prev_check', { y: m.prevCheck.year, r: money(m.prevCheck.rep, m) || '0', g: money(m.prevCheck.gl, m) || '0' })}</div>` : ''}`;
   }
 
   function renderSettings(m) {
@@ -260,15 +330,17 @@ const AgedECL = (() => {
             <span dir="ltr">${U.esc(a.code)}</span> ${U.esc(a.name)}
             <span class="muted small">${t('ecl_acc_meta', { n: a.partners, b: money(a.balance, m) || '0' })}</span>
           </label>`).join('')}
-        <h3 style="margin:14px 0 6px">${t('ecl_recorded')}</h3>
+        <h3 style="margin:14px 0 6px">${t(m.prev ? 'ecl_opening' : 'ecl_recorded')}</h3>
+        ${m.prev ? `<p style="margin:0 0 8px">${t('ecl_opening_from', { v: money(m.recorded, m) || '0', y: m.prev.year, f: m.prevFile + (m.prev.sheet ? ' · ' + m.prev.sheet : '') })}</p>
+          ${m.allowDiff ? `<div class="notice warn">${t('ecl_allow_diff', { a: money(m.tbAllow, m) || '0', b: money(m.recorded, m) || '0' })}</div>` : ''}` : ''}
         <div class="row" style="align-items:flex-end">
-          <label class="field">${t('ecl_recorded_from')}
+          <label class="field">${t(m.prev ? 'ecl_tb_check_from' : 'ecl_recorded_from')}
             <select id="eclAllow" style="max-width:520px">
               ${opts.map(opt).join('')}
               ${others.length ? `<optgroup label="${U.esc(t('ecl_other_accounts'))}">${others.map(opt).join('')}</optgroup>` : ''}
               <option value="manual" ${!m.allow ? 'selected' : ''}>${t('ecl_type_it')}</option>
             </select></label>
-          ${!m.allow ? `<label class="field">${t('ecl_amount')}<input id="eclManual" type="number" step="any" value="${U.esc(c.manualProv)}" style="width:140px"></label>` : ''}
+          ${!m.allow && !m.prev ? `<label class="field">${t('ecl_amount')}<input id="eclManual" type="number" step="any" value="${U.esc(c.manualProv)}" style="width:140px"></label>` : ''}
         </div>
         ${!m.allowOptions.length ? `<p class="muted small" style="margin:6px 0 0">${t('ecl_tb_hint')}</p>` : ''}
       </div>`;
@@ -281,8 +353,8 @@ const AgedECL = (() => {
           <div class="stat"><b>${money(m.aged.reduce((s, r) => s + r.total, 0), m) || '0'}</b><span>${t('ecl_s_aged')}</span></div>
           ${m.credits.length ? `<div class="stat"><b>${money(m.credits.reduce((s, r) => s + r.total, 0), m)}</b><span>${t('ecl_s_credits', { n: m.credits.length })}</span></div>` : ''}
           <div class="stat"><b>${money(m.eclTotal, m) || '0'}</b><span>${t('ecl_s_ecl')}</span></div>
-          <div class="stat"><b>${money(m.recorded, m) || '0'}</b><span>${t('ecl_s_recorded')}</span></div>
-          <div class="stat"><b>${money(m.required, m) || '0'}</b><span>${t(m.required >= 0 ? 'ecl_s_more' : 'ecl_s_less')}</span></div>
+          <div class="stat"><b>${money(m.recorded, m) || '0'}</b><span>${t(m.prev ? 'ecl_s_opening' : 'ecl_s_recorded')}</span></div>
+          <div class="stat"><b>${money(m.required, m) || '0'}</b><span>${t(m.prev ? (m.required >= 0 ? 'ecl_charge' : 'ecl_release') : m.required >= 0 ? 'ecl_s_more' : 'ecl_s_less')}</span></div>
         </div>
         ${m.tbCheck.map(x => `<div class="notice ${x.ok ? 'ok' : 'bad'}">${x.ok ? '✓ ' + t('ecl_tb_ok', { a: accLabel(m, x.code) }) : t('ecl_tb_bad', { a: accLabel(m, x.code), x: money(x.aged, m) || '0', y: money(x.tb, m) || '0' })}</div>`).join('')}
         <div class="row" style="margin:10px 0"><button class="btn" id="eclXlsx" type="button">${t('ecl_download')}</button></div>
@@ -291,6 +363,9 @@ const AgedECL = (() => {
       </div>`;
   }
 
+  const recLabel = m => t(m.prev ? 'ecl_rec_prev' : 'ecl_rec_row', { y: m.prev && m.prev.year });
+  const reqLabel = m => t(m.prev ? (m.required >= 0 ? 'ecl_charge' : 'ecl_release') : m.required >= 0 ? 'ecl_req_more' : 'ecl_req_less');
+  const srcLabel = h => t({ current: 'ecl_src_current', prior: 'ecl_src_prior', gl: 'ecl_src_gl' }[h.src] || 'ecl_src_manual');
   const bandHead = () => `${Array.from({ length: NB }, (_, i) => `<th class="num">${bandLabel(i)}</th>`).join('')}<th class="num">${t('au_total')}</th>`;
   const bandCells = (m, b, tot) => b.map(v => `<td class="num">${money(v, m)}</td>`).join('') + `<td class="num"><b>${money(tot, m) || '0'}</b></td>`;
 
@@ -320,7 +395,7 @@ const AgedECL = (() => {
         ${h.v.map((v, i) => `<td class="num">${h.src === 'manual'
           ? `<input class="num" data-hist="${h.year}" data-i="${i}" value="${v ? (v / m.UNIT).toFixed(m.dec) : ''}" inputmode="decimal">` : n(v)}</td>`).join('')}
         <td class="num"><b>${n(h.v.reduce((s, x) => s + x, 0)) || '0'}</b></td>
-        <td>${h.src === 'current' ? `<span class="muted small">${t('ecl_src_current')}</span>` : `
+        <td>${h.src === 'current' || h.src === 'prior' ? `<span class="muted small">${t(h.src === 'prior' ? 'ecl_src_prior' : 'ecl_src_current')}</span>` : `
           <select data-src="${h.year}">
             ${h.canGL ? `<option value="gl" ${h.src === 'gl' ? 'selected' : ''}>${t('ecl_src_gl')}</option>` : ''}
             <option value="manual" ${h.src === 'manual' ? 'selected' : ''}>${t('ecl_src_manual')}</option>
@@ -353,8 +428,8 @@ const AgedECL = (() => {
           <tr><td>${t('ecl_pct')}</td>${m.pct.map(v => `<td class="num">${pctTxt(v)}</td>`).join('')}<td></td></tr>
           <tr><td>${t('ecl_gross')}</td>${bandCells(m, m.baseTotals, m.baseTotals.reduce((s, x) => s + x, 0))}</tr>
           <tr class="au-acc"><td>${t('ecl_required')}</td>${bandCells(m, m.ecl, m.eclTotal)}</tr>
-          <tr><td>${t('ecl_rec_row')}</td>${'<td></td>'.repeat(NB)}<td class="num">${n(m.recorded) || '0'}</td></tr>
-          <tr class="au-total"><td>${t(m.required >= 0 ? 'ecl_req_more' : 'ecl_req_less')}</td>${'<td></td>'.repeat(NB)}<td class="num">${n(m.required) || '0'}</td></tr>
+          <tr><td>${recLabel(m)}</td>${'<td></td>'.repeat(NB)}<td class="num">${n(m.recorded) || '0'}</td></tr>
+          <tr class="au-total"><td>${reqLabel(m)}</td>${'<td></td>'.repeat(NB)}<td class="num">${n(m.required) || '0'}</td></tr>
         </tbody>
       </table></div>
 
@@ -536,7 +611,7 @@ const AgedECL = (() => {
       S.s(r, 0, h.year, ST.label);
       h.v.forEach((x, i) => (h.src === 'current' ? S.fm(r, B0 + i, A1(T, B0 + i), v(x), z, ST.cell) : S.nv(r, B0 + i, v(x), z, ST.cell)));
       S.fm(r, TOT, sumRow(r), v(h.v.reduce((a, b) => a + b, 0)), z, ST.label);
-      S.s(r, TOT + 1, t(h.src === 'current' ? 'ecl_src_current' : h.src === 'gl' ? 'ecl_src_gl' : 'ecl_src_manual'), ST.item);
+      S.s(r, TOT + 1, srcLabel(h), ST.item);
       r++;
     }
     const AVG = r, SH = r + 1;
@@ -572,9 +647,10 @@ const AgedECL = (() => {
     S.s(EC, 0, t('ecl_required'), ST.total);
     for (let i = 0; i < NB; i++) S.fm(EC, B0 + i, `${A1(GR, B0 + i)}*${A1(PC, B0 + i)}`, v(m.ecl[i]), z, ST.total);
     S.fm(EC, TOT, sumRow(EC), v(m.eclTotal), z, ST.total);
-    S.s(RC, 0, t('ecl_rec_row'), ST.cell); S.paint(RC, B0, TOT - 1, ST.cell); S.nv(RC, TOT, v(m.recorded), z, ST.label);
-    if (m.allow) S.s(RC, TOT + 1, `${m.allow.code} ${m.allow.name} (${m.allow.file})`, ST.note);
-    S.s(RQ, 0, t(m.required >= 0 ? 'ecl_req_more' : 'ecl_req_less'), ST.result); S.paint(RQ, B0, TOT - 1, ST.result);
+    S.s(RC, 0, recLabel(m), ST.cell); S.paint(RC, B0, TOT - 1, ST.cell); S.nv(RC, TOT, v(m.recorded), z, ST.label);
+    if (m.prev) S.s(RC, TOT + 1, `${m.prevFile}${m.prev.sheet ? ' · ' + m.prev.sheet : ''}`, ST.note);
+    else if (m.allow) S.s(RC, TOT + 1, `${m.allow.code} ${m.allow.name} (${m.allow.file})`, ST.note);
+    S.s(RQ, 0, reqLabel(m), ST.result); S.paint(RQ, B0, TOT - 1, ST.result);
     S.fm(RQ, TOT, `${A1(EC, TOT)}-${A1(RC, TOT)}`, v(m.required), z, ST.result);
 
     // 5. ECL per customer.
@@ -624,6 +700,10 @@ const AgedECL = (() => {
     const add = q('#eclAdd'); if (add) add.addEventListener('click', () => file.click());
     const reset = q('#eclReset'); if (reset) reset.addEventListener('click', () => { Object.assign(st, { files: [], error: '', model: null }); App.rerender(); });
     root.querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', () => { st.files = st.files.filter(f => f.id !== b.dataset.rm); st.model = null; App.rerender(); }));
+    root.querySelectorAll('[data-prevsheet]').forEach(sel => sel.addEventListener('change', () => {
+      const f = st.files.find(x => x.id === sel.dataset.prevsheet);
+      if (f) { f.sel = +sel.value; adoptPrev(f); App.rerender(); }
+    }));
 
     const change = (el, fn) => el && el.addEventListener('change', () => { const c = cfg(); fn(c, el); saveCfg(c); App.rerender(); });
     change(q('#eclYear'), (c, el) => { c.year = el.value; });
