@@ -708,10 +708,10 @@ const Audit = (() => {
   }
 
   /* ---------- Page: pick a report ---------- */
-  const REPORTS = [['tb', 'au_tb_title'], ['ecl', 'ecl_title']];
+  const REPORTS = [['tb', 'au_tb_title'], ['ecl', 'ecl_title'], ['eos', 'eo_title']];
   let report = 'tb';
   try { report = localStorage.getItem('oh_audit_report') || 'tb'; } catch (e) { /* default */ }
-  const cur = () => (report === 'ecl' ? AgedECL : { render: renderTB, mount: mountTB });
+  const cur = () => (report === 'ecl' ? AgedECL : report === 'eos' ? Indemnity : { render: renderTB, mount: mountTB });
 
   function page() {
     return `

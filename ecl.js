@@ -728,5 +728,5 @@ const AgedECL = (() => {
     const xl = q('#eclXlsx'); if (xl) xl.addEventListener('click', exportXlsx);
   }
 
-  return { render, mount, _onFiles: onFiles, _state: st, _model: () => model() };
+  return { render, mount, _onFiles: onFiles, _state: st, _model: () => model(), xl: { lib: styledLib, ST } };
 })();
