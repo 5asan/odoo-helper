@@ -29,6 +29,16 @@ const Indemnity = (() => {
   const num = x => { if (typeof x === 'number') return x; const p = U.parseNum(x); return p ? p.v : 0; };
 
   /* ---------- Calculation ---------- */
+  // Service in years = completed years (anniversaries) + leftover days ÷ 365, so leap days don't add extra.
+  // endN = day number just after the last day of service (date + 1 − unpaid days). Same as Excel DATEDIF + EDATE.
+  function serviceYears(joinIso, endN) {
+    const [y, m, d] = joinIso.split('-').map(Number);
+    const ann = k => { const last = new Date(Date.UTC(y + k, m, 0)).getUTCDate(); return Date.UTC(y + k, m - 1, Math.min(d, last)) / DAY; };
+    if (endN <= dnum(joinIso)) return 0;
+    let k = 0;
+    while (ann(k + 1) <= endN) k++;
+    return k + (endN - ann(k)) / 365;
+  }
   const factorOf = (basis, years) => (basis !== 'resign' ? 1 : years < 3 ? 0 : years < 5 ? 0.5 : years < 10 ? 2 / 3 : 1);
   function calc(e, c) {
     const date = asOf(c), dec = +c.dec || 0, days = +c.days || 26;
@@ -38,7 +48,7 @@ const Indemnity = (() => {
     const monthly = num(e.basic) + num(e.allow);
     if (!(monthly > 0)) return Object.assign(out, { err: 'eo_err_pay' });
     const service = Math.max(0, dnum(date) - dnum(e.join) + 1 - num(e.unpaid));
-    const years = service / 365;
+    const years = serviceYears(e.join, dnum(date) + 1 - num(e.unpaid));
     const first = Math.min(years, 5) * 15 * monthly / days;
     const after = Math.max(years - 5, 0) * monthly;
     const cap = 18 * monthly;
@@ -330,7 +340,8 @@ const Indemnity = (() => {
         f(rr, 6, `${A(rr, 4)}+${A(rr, 5)}`, x.monthly, zA, ST.cell);
         n(rr, 7, num(e.unpaid), '0', ST.cell);
         f(rr, 8, `MAX(0,${D}-${A(rr, 3)}+1-${A(rr, 7)})`, x.service, '#,##0', ST.cell);
-        f(rr, 9, `${A(rr, 8)}/365`, x.years, zY, ST.cell);
+        const END = `(${D}+1-${A(rr, 7)})`, FY = `DATEDIF(${A(rr, 3)},MAX(${A(rr, 3)},${END}),"y")`;
+        f(rr, 9, `MAX(0,${FY}+(${END}-EDATE(${A(rr, 3)},12*${FY}))/365)`, x.years, zY, ST.cell);
         f(rr, 10, `MIN(${A(rr, 9)},5)*15*${A(rr, 6)}/${DAYS}`, x.first, zA, ST.cell);
         f(rr, 11, `MAX(${A(rr, 9)}-5,0)*${A(rr, 6)}`, x.after, zA, ST.cell);
         f(rr, 12, `${CAP}*${A(rr, 6)}`, x.cap, zA, ST.cell);
