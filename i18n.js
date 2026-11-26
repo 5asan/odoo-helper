@@ -312,6 +312,8 @@ const I18N = {
     ecl_x_forward: 'Is there any forward looking assumption for the risk:',
     ecl_x_max: 'Max default rate (> 365 days share + forward-looking)', ecl_x_req: 'Required provision',
     ecl_check: 'Check',
+    ecl_init_move: 'Initial Balance',
+    ecl_init_warn: 'This GL starts on {d}, so its opening balances ({v}) have no partner and no invoice dates. They are shown as "(No partner)" and aged from that date. For a correct partner aging, export the AR GL from the very beginning (Odoo date filter: start before the first entry).',
   },
   ar: {
     appName: 'مساعد أودو',
@@ -622,6 +624,8 @@ const I18N = {
     ecl_x_forward: 'هل توجد افتراضات مستقبلية للمخاطر:',
     ecl_x_max: 'أعلى نسبة تعثر (نسبة أكثر من 365 يوم + الافتراضات المستقبلية)', ecl_x_req: 'المخصص المطلوب',
     ecl_check: 'تحقق',
+    ecl_init_move: 'الرصيد الافتتاحي',
+    ecl_init_warn: 'دفتر الأستاذ يبدأ في {d}، لذلك الأرصدة الافتتاحية ({v}) بدون شريك وبدون تواريخ فواتير. تظهر تحت "(بدون شريك)" وتُحسب أعمارها من ذلك التاريخ. لأعمار صحيحة لكل شريك، صدّر دفتر أستاذ الذمم من البداية (في أودو: تاريخ بداية قبل أول قيد).',
   },
 };
 

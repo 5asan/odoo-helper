@@ -82,6 +82,18 @@ const AgedECL = (() => {
     const names = {};
     for (const f of [...gls, ...tbs]) Object.assign(names, f.names);
     const lines = [];
+    // A GL exported for one year starts with an "Initial Balance" per account, without partners or dates.
+    // Keep it (as "(No partner)", dated the day before the GL starts) so totals still agree with the TB.
+    let initTotal = 0;
+    for (const f of gls) {
+      const date = new Date(Date.parse(f.from + 'T00:00:00Z') - DAY).toISOString().slice(0, 10);
+      for (const l of f.init) {
+        const v = toInt(l.d) - toInt(l.c);
+        if (!v) continue;
+        initTotal += v;
+        lines.push({ n: lines.length, date, code: l.code, p: NOP(), v, move: t('ecl_init_move'), label: '' });
+      }
+    }
     for (const f of gls) for (const l of f.lines) lines.push({ n: lines.length, date: l.date, code: l.code, p: l.p, v: toInt(l.d) - toInt(l.c), move: l.move || '', label: l.label || '' });
     const dates = gls.flatMap(f => [f.from, f.to]).sort();
     const glFrom = dates[0], glTo = dates[dates.length - 1];
@@ -90,7 +102,7 @@ const AgedECL = (() => {
     const year = years.includes(c.year) ? c.year : years[years.length - 1];
     const asOf = `${year}-12-31`;
 
-    const m = { dec, UNIT, names, lines, glFrom, glTo, years, year, asOf, gls, tbs, agingCache: {} };
+    const m = { dec, UNIT, names, lines, glFrom, glTo, years, year, asOf, gls, tbs, initTotal, agingCache: {} };
     const all = aging(m, asOf);
     const codes = [...new Set(lines.map(l => l.code))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     m.accounts = codes.map(code => {
@@ -209,7 +221,8 @@ const AgedECL = (() => {
         <button class="btn ghost" id="eclAdd" type="button">${t('au_add')}</button>
         <button class="btn ghost" id="eclReset" type="button">${t('au_reset')}</button>
       </div>
-      ${m.empty ? `<div class="notice warn" style="margin-top:10px">${t('ecl_need_gl')}</div>` : ''}`;
+      ${m.empty ? `<div class="notice warn" style="margin-top:10px">${t('ecl_need_gl')}</div>` : ''}
+      ${!m.empty && m.initTotal ? `<div class="notice warn" style="margin-top:10px">${t('ecl_init_warn', { v: money(m.initTotal, m), d: fd(m.glFrom) })}</div>` : ''}`;
   }
 
   function renderSettings(m) {

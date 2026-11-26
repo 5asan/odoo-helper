@@ -74,6 +74,14 @@ const Audit = (() => {
   const at = (r, i) => (r.v && typeof r.v[i] === 'number' ? r.v[i] : parse(r[i]));
   // Decimals shown in a formatted amount ("1,234.500" → 3). -1 when it can't tell.
   const decOf = s => { const m = String(s).match(/^-?\(?[\d,]*\.(\d+)\)?$/); return m && m[1].length <= 3 ? m[1].length : -1; };
+  // Decimals of an amount cell. The stored value wins: Odoo formats KWD as "#,##0.00" but stores 3 decimals.
+  const decAt = (r, i) => {
+    const v = r.v && r.v[i];
+    if (typeof v !== 'number') return decOf(r[i]);
+    if (!v) return -1;
+    for (let d = 0; d <= 3; d++) { const x = v * Math.pow(10, d); if (Math.abs(x - Math.round(x)) < 1e-3) return d; }
+    return -1;
+  };
   const cleanP = s => String(s || '').replace(/[‎‏]/g, '').replace(/\s+/g, ' ').trim();
   const dayBefore = iso => new Date(Date.parse(iso + 'T00:00:00Z') - 864e5).toISOString().slice(0, 10);
 
@@ -130,7 +138,7 @@ const Audit = (() => {
       }
       if (!code) continue;
       const ds = r[hi.debit[0]], cs = r[hi.credit[0]];
-      dec = Math.max(dec, decOf(ds), decOf(cs));
+      dec = Math.max(dec, decAt(r, hi.debit[0]), decAt(r, hi.credit[0]));
       // Entry number: its own column (Journal Items) or the "Account Name" column on line rows (GL report).
       const move = hi.move >= 0 ? r[hi.move] : hi.code >= 0 ? r[nameCol] : '';
       lines.push({ date, code, p: cleanP(hi.partner >= 0 ? r[hi.partner] : '') || NOP, d: Math.abs(at(r, hi.debit[0])), c: Math.abs(at(r, hi.credit[0])),
@@ -160,7 +168,7 @@ const Audit = (() => {
       if (!r.some(c => c)) continue;
       let code = codeCol >= 0 ? r[codeCol] : '', name = r[nameCol] || '';
       if (codeCol < 0) { const m = name.match(ACC_RE); if (m && !GROUP_RE.test(name)) { code = m[1]; name = m[2]; } }
-      const v = pairs.map(([d, c]) => { dec = Math.max(dec, decOf(r[d]), decOf(r[c])); return at(r, d) - at(r, c); });
+      const v = pairs.map(([d, c]) => { dec = Math.max(dec, decAt(r, d), decAt(r, c)); return at(r, d) - at(r, c); });
       const dsum = pairs.slice(1, -1).reduce((s, [d]) => s + at(r, d), 0);
       const csum = pairs.slice(1, -1).reduce((s, [, c]) => s + at(r, c), 0);
       if (code && CODE_RE.test(code)) {
@@ -210,7 +218,7 @@ const Audit = (() => {
         continue;
       }
       if (!cur) continue;
-      dec = Math.max(dec, decOf(r[dC]), decOf(r[cC]));
+      dec = Math.max(dec, decAt(r, dC), decAt(r, cC));
       const net = at(r, dC) - at(r, cC);
       rows.push({ code: cur.code, und: cur.und, p: NOP_RE.test(partner) ? NOP : partner, net });
     }
