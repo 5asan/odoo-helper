@@ -14,7 +14,7 @@ const Indemnity = (() => {
   const SKEY = 'oh_eosi_settings';
   const lastMonthEnd = () => { const d = new Date(); return new Date(Date.UTC(d.getFullYear(), d.getMonth(), 0)).toISOString().slice(0, 10); };
   const loadAll = () => { try { return JSON.parse(localStorage.getItem(SKEY) || '{}'); } catch (e) { return {}; } };
-  const cfg = () => Object.assign({ date: '', revDate: '', days: 26, basis: 'term', dec: 3, provAcc: '', expAcc: '', journal: 'MISC', perEmp: true },
+  const cfg = () => Object.assign({ date: '', revDate: '', days: 26, count: 'net', basis: 'term', dec: 3, provAcc: '', expAcc: '', journal: 'MISC', perEmp: true },
     loadAll()[App.companyId] || {});
   function saveCfg(c) {
     const all = loadAll(); all[App.companyId] = c;
@@ -27,6 +27,7 @@ const Indemnity = (() => {
   const r = (v, dec) => { const p = Math.pow(10, dec); return Math.round((v + Math.sign(v) * 1e-9) * p) / p; };
   const money = (v, dec) => (v ? v.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec }) : '-');
   const num = x => { if (typeof x === 'number') return x; const p = U.parseNum(x); return p ? p.v : 0; };
+  const isYes = v => v === true || v === 1 || /^(1|y|yes|true|x|✓|✔|نعم|\+1)$/i.test(String(v == null ? '' : v).trim());
 
   /* ---------- Calculation ---------- */
   const factorOf = (basis, years) => (basis !== 'resign' ? 1 : years < 3 ? 0 : years < 5 ? 0.5 : years < 10 ? 2 / 3 : 1);
@@ -37,9 +38,11 @@ const Indemnity = (() => {
     if (e.join > date) return Object.assign(out, { err: 'eo_err_future' });
     const monthly = num(e.basic) + num(e.allow);
     if (!(monthly > 0)) return Object.assign(out, { err: 'eo_err_pay' });
-    // Net working days = date − joining date − unpaid leave days; years = days ÷ 365 (the company accountant's method:
+    // Net working days = date − joining date (+1 when counting inclusive, for all or for flagged employees) − unpaid
+    // leave days; years = days ÷ 365 (the company accountant's method:
     // salary/26×15×5 + salary×(days − 1825)/365).
-    const service = Math.max(0, dnum(date) - dnum(e.join) - num(e.unpaid));
+    const plus = c.count === 'incl' || isYes(e.plus1) ? 1 : 0;
+    const service = Math.max(0, dnum(date) - dnum(e.join) + plus - num(e.unpaid));
     const years = service / 365;
     const first = Math.min(years, 5) * 15 * monthly / days;
     const after = Math.max(years - 5, 0) * monthly;
@@ -50,7 +53,7 @@ const Indemnity = (() => {
     const paid = r(num(e.paid), dec);
     const ind = r(Math.max(gross - paid, 0), dec);
     const prev = r(num(e.prev), dec);
-    return { ok: true, monthly, service, years, first, after, cap, capped, factor, gross, paid, ind, prev, move: r(ind - prev, dec) };
+    return { ok: true, plus, monthly, service, years, first, after, cap, capped, factor, gross, paid, ind, prev, move: r(ind - prev, dec) };
   }
   function model() {
     const c = cfg();
@@ -68,6 +71,7 @@ const Indemnity = (() => {
     basic: /basic|الراتب الأساسي|الأساسي/i,
     allow: /allowance|بدل|علاوات/i,
     unpaid: /unpaid|without pay|بدون راتب|غير مدفوعة/i,
+    plus1: /^\+ ?1\b|add 1 day|plus 1 day|إضافة يوم|يوم إضافي|\+1 يوم/i,
     paid: /advance|paid in advance|already paid|^paid|^received|المدفوع مقدم|مدفوعة مقدم|المصروف مقدم|سلف|المستلم/i,
     prev: /last provision|previous provision|opening provision|المخصص السابق|مخصص سابق/i,
     ind: /^(indemnity|eosi|end of service indemnity)\b(?!.*(part|year))|^(المكافأة|مكافأة نهاية الخدمة)$/i,
@@ -79,7 +83,7 @@ const Indemnity = (() => {
       for (let i = 0; i < Math.min(rows.length, 30); i++) {
         const h = rows[i].map(x => x.replace(/\*/g, '').replace(/\s+/g, ' ').trim());
         const at = k => h.findIndex(x => x && COLS[k].test(x));
-        const ix = { code: at('code'), name: at('name'), join: at('join'), basic: at('basic'), allow: at('allow'), unpaid: at('unpaid'), paid: at('paid'), prev: at('prev'), ind: at('ind') };
+        const ix = { code: at('code'), name: at('name'), join: at('join'), basic: at('basic'), allow: at('allow'), unpaid: at('unpaid'), plus1: at('plus1'), paid: at('paid'), prev: at('prev'), ind: at('ind') };
         if (ix.name < 0 || ix.join < 0 || ix.basic < 0) continue;
         // "As at dd/mm/yyyy" in the title rows of our own export.
         let prevDate = '';
@@ -96,7 +100,7 @@ const Indemnity = (() => {
           const jv = val(row, 'join');
           const join = jv instanceof Date ? U.parseDate(jv) : typeof jv === 'number' && jv > 1000 && jv < 80000 ? new Date(Math.round((jv - 25569) * DAY)).toISOString().slice(0, 10) : U.parseDate(row[ix.join]);
           emps.push({ id: U.uid(), code: String(row[ix.code] || '').trim(), name, join: join || '',
-            basic: num(val(row, 'basic')), allow: num(val(row, 'allow')), unpaid: num(val(row, 'unpaid')), paid: num(val(row, 'paid')),
+            basic: num(val(row, 'basic')), allow: num(val(row, 'allow')), unpaid: num(val(row, 'unpaid')), paid: num(val(row, 'paid')), plus1: isYes(val(row, 'plus1')),
             prev: ix.ind >= 0 ? num(val(row, 'ind')) : num(val(row, 'prev')) });
         }
         return { emps, isPrev: ix.ind >= 0, prevDate };
@@ -163,6 +167,9 @@ const Indemnity = (() => {
           <label class="field">${t('eo_days')}
             <select id="eoDays"><option value="26" ${+c.days === 26 ? 'selected' : ''}>${t('eo_days26')}</option>
               <option value="30" ${+c.days === 30 ? 'selected' : ''}>${t('eo_days30')}</option></select></label>
+          <label class="field">${t('eo_count')}
+            <select id="eoCount"><option value="net" ${c.count !== 'incl' ? 'selected' : ''}>${t('eo_count_net')}</option>
+              <option value="incl" ${c.count === 'incl' ? 'selected' : ''}>${t('eo_count_incl')}</option></select></label>
           <label class="field">${t('eo_basis')}
             <select id="eoBasis"><option value="term" ${c.basis !== 'resign' ? 'selected' : ''}>${t('eo_basis_term')}</option>
               <option value="resign" ${c.basis === 'resign' ? 'selected' : ''}>${t('eo_basis_resign')}</option></select></label>
@@ -190,6 +197,7 @@ const Indemnity = (() => {
           ${F.map(([k, type]) => `<label class="field">${t('eo_f_' + k)}${['name', 'join', 'basic'].includes(k) ? ' *' : ''}
             <input data-ef="${k}" type="${type}" ${type === 'number' ? 'step="any" min="0"' : ''} value="${U.esc(f[k] == null ? '' : f[k])}" style="width:${k === 'name' ? 220 : k === 'join' ? 150 : 120}px"></label>`).join('')}
         </div>
+        <label class="row" style="gap:8px;margin-top:8px"><input type="checkbox" data-ef="plus1" ${f.plus1 ? 'checked' : ''} ${c.count === 'incl' ? 'disabled' : ''}> ${t(c.count === 'incl' ? 'eo_plus1_all' : 'eo_plus1')}</label>
         <div id="eoOneOut" style="margin-top:10px">${oneOut(c)}</div>
         <div class="row" style="margin-top:10px">
           <button class="btn" id="eoAdd" type="button">${t(st.editId ? 'eo_save' : 'eo_add')}</button>
@@ -237,7 +245,7 @@ const Indemnity = (() => {
             <th class="num">${t('eo_h_ind')}</th><th class="num">${t('eo_f_prev')}</th><th class="num">${t('eo_move')}</th><th></th></tr></thead>
           <tbody>${m.rows.map(({ e, x }) => `
             <tr class="${x.ok ? '' : 'ecl-credit'}">
-              <td>${U.esc(e.code)}</td><td>${U.esc(e.name)}</td><td>${fd(e.join)}</td>
+              <td>${U.esc(e.code)}</td><td>${U.esc(e.name)}</td><td>${fd(e.join)}${x.ok && x.plus && m.c.count !== 'incl' ? ' <span class="badge soon" title="' + U.esc(t('eo_plus1_tip')) + '">+1</span>' : ''}</td>
               ${x.ok ? `<td class="num">${money(x.monthly, dec)}</td><td class="num">${x.years.toFixed(3)}</td>
                 <td class="num">${money(x.first, dec)}</td><td class="num">${money(x.after, dec)}${x.capped ? ' ⚑' : ''}</td>
                 <td class="num">${money(x.gross, dec)}</td><td class="num">${money(x.paid, dec)}</td>
@@ -281,12 +289,12 @@ const Indemnity = (() => {
 
   /* ---------- Template ---------- */
   async function exportTemplate() {
-    const head = ['Employee Code', 'Employee Name *', 'Joining Date *', 'Basic Salary *', 'Allowances', 'Unpaid Leave Days', 'Advance Paid', 'Last Provision'];
-    const help = [[t('eo_tpl_title')], [], ...['eo_tpl_1', 'eo_tpl_2', 'eo_tpl_3', 'eo_tpl_4', 'eo_tpl_8', 'eo_tpl_5', 'eo_tpl_6', 'eo_tpl_7'].map(k => [t(k)])];
+    const head = ['Employee Code', 'Employee Name *', 'Joining Date *', 'Basic Salary *', 'Allowances', 'Unpaid Leave Days', 'Advance Paid', 'Last Provision', 'Add 1 Day (Yes)'];
+    const help = [[t('eo_tpl_title')], [], ...['eo_tpl_1', 'eo_tpl_2', 'eo_tpl_3', 'eo_tpl_4', 'eo_tpl_8', 'eo_tpl_5', 'eo_tpl_9', 'eo_tpl_6', 'eo_tpl_7'].map(k => [t(k)])];
     const X = window.XLSX;
     const wb = X.utils.book_new();
     const ws = X.utils.aoa_to_sheet([head]);
-    ws['!cols'] = [14, 32, 16, 14, 14, 16, 16, 16].map(w => ({ wch: w }));
+    ws['!cols'] = [14, 32, 16, 14, 14, 16, 16, 16, 16].map(w => ({ wch: w }));
     X.utils.book_append_sheet(wb, ws, 'Employees');
     const hs = X.utils.aoa_to_sheet(help); hs['!cols'] = [{ wch: 110 }];
     X.utils.book_append_sheet(wb, hs, 'Instructions');
@@ -309,7 +317,7 @@ const Indemnity = (() => {
       const zA = dec ? `#,##0.${'0'.repeat(dec)};(#,##0.${'0'.repeat(dec)});"-"` : '#,##0;(#,##0);"-"';
       const zD = 'dd/mm/yyyy', zY = '0.000';
       const xd = iso => dnum(iso) + 25569;     // Excel serial date
-      const LAST = 18;
+      const LAST = 19;
       s(0, 0, t('eo_x_title'), ST.title); merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: LAST } });
       s(1, 0, App.company().name, ST.company); merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: LAST } });
       s(2, 0, t('eo_x_asof', { d: fd(m.date) }), ST.sub); merges.push({ s: { r: 2, c: 0 }, e: { r: 2, c: LAST } });
@@ -318,11 +326,12 @@ const Indemnity = (() => {
       s(5, 0, t('eo_x_days'), ST.label); n(5, 3, +c.days || 26, '0', ST.key);
       s(6, 0, t('eo_x_cap'), ST.label); n(6, 3, 18, '0', ST.key);
       s(7, 0, t('eo_basis'), ST.label); s(7, 3, t(c.basis === 'resign' ? 'eo_basis_resign' : 'eo_basis_term'), ST.key); merges.push({ s: { r: 7, c: 3 }, e: { r: 7, c: 5 } });
-      [4, 5, 6, 7].forEach(rr => merges.push({ s: { r: rr, c: 0 }, e: { r: rr, c: 2 } }));
-      const D = A(4, 3, true), DAYS = A(5, 3, true), CAP = A(6, 3, true);
-      const H = 9;
+      s(8, 0, t('eo_x_incl'), ST.label); n(8, 3, c.count === 'incl' ? 1 : 0, '0', ST.key);
+      [4, 5, 6, 7, 8].forEach(rr => merges.push({ s: { r: rr, c: 0 }, e: { r: rr, c: 2 } }));
+      const D = A(4, 3, true), DAYS = A(5, 3, true), CAP = A(6, 3, true), INCL = A(8, 3, true);
+      const H = 10;
       const heads = ['#', t('eo_f_code'), t('eo_f_name'), t('eo_f_join'), t('eo_f_basic'), t('eo_f_allow'), t('eo_monthly'), t('eo_f_unpaid'),
-        t('eo_h_days'), t('eo_h_years'), t('eo_first5'), t('eo_after5'), t('eo_h_cap'), t('eo_factor'), t('eo_gross'), t('eo_f_paid'), t('eo_h_ind'), t('eo_f_prev'), t('eo_move')];
+        t('eo_h_days'), t('eo_h_years'), t('eo_first5'), t('eo_after5'), t('eo_h_cap'), t('eo_factor'), t('eo_gross'), t('eo_f_paid'), t('eo_h_ind'), t('eo_f_prev'), t('eo_move'), t('eo_h_plus1')];
       heads.forEach((h, i) => s(H, i, h, i === 2 ? ST.headL : ST.head));
       const rows = [];
       m.good.forEach(({ e, x }, i) => {
@@ -331,7 +340,7 @@ const Indemnity = (() => {
         n(rr, 3, xd(e.join), zD, ST.cell); n(rr, 4, num(e.basic), zA, ST.cell); n(rr, 5, num(e.allow), zA, ST.cell);
         f(rr, 6, `${A(rr, 4)}+${A(rr, 5)}`, x.monthly, zA, ST.cell);
         n(rr, 7, num(e.unpaid), '0', ST.cell);
-        f(rr, 8, `MAX(0,${D}-${A(rr, 3)}-${A(rr, 7)})`, x.service, '#,##0', ST.cell);
+        f(rr, 8, `MAX(0,${D}-${A(rr, 3)}+MAX(${INCL},${A(rr, 19)})-${A(rr, 7)})`, x.service, '#,##0', ST.cell);
         f(rr, 9, `${A(rr, 8)}/365`, x.years, zY, ST.cell);
         f(rr, 10, `MIN(${A(rr, 9)},5)*15*${A(rr, 6)}/${DAYS}`, x.first, zA, ST.cell);
         f(rr, 11, `MAX(${A(rr, 9)}-5,0)*${A(rr, 6)}`, x.after, zA, ST.cell);
@@ -344,6 +353,7 @@ const Indemnity = (() => {
         f(rr, 16, `MAX(0,${A(rr, 14)}-${A(rr, 15)})`, x.ind, zA, ST.key);
         n(rr, 17, x.prev, zA, ST.cell);
         f(rr, 18, `${A(rr, 16)}-${A(rr, 17)}`, x.move, zA, ST.cell);
+        n(rr, 19, isYes(e.plus1) ? 1 : 0, "0", ST.cell);
       });
       const T = H + 1 + m.good.length;
       s(T, 0, t('au_total'), ST.total); for (let cc = 1; cc <= LAST; cc++) s(T, cc, '', ST.total);
@@ -364,7 +374,7 @@ const Indemnity = (() => {
       rr += 2;
       ['eo_x_note1', 'eo_x_note2', 'eo_x_note3'].forEach(k => { s(rr, 0, t(k), ST.note); merges.push({ s: { r: rr, c: 0 }, e: { r: rr, c: LAST } }); rr++; });
       ws['!ref'] = X.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: LAST } });
-      ws['!cols'] = [5, 12, 30, 12, 12, 12, 13, 9, 10, 9, 14, 14, 14, 10, 15, 14, 15, 15, 14].map(w => ({ wch: w }));
+      ws['!cols'] = [5, 12, 30, 12, 12, 12, 13, 9, 10, 9, 14, 14, 14, 10, 15, 14, 15, 15, 14, 9].map(w => ({ wch: w }));
       ws['!rows'] = Array.from({ length: maxR + 1 }, (_, i) => (i === H ? { hpt: 44 } : i === 0 ? { hpt: 24 } : {}));
       ws['!merges'] = merges;
       const wb = X.utils.book_new();
@@ -385,6 +395,7 @@ const Indemnity = (() => {
     const change = (el, fn) => el && el.addEventListener('change', () => { const c = cfg(); fn(c, el); saveCfg(c); App.rerender(); });
     change(q('#eoDate'), (c, el) => { c.date = el.value; });
     change(q('#eoDays'), (c, el) => { c.days = +el.value; });
+    change(q('#eoCount'), (c, el) => { c.count = el.value; });
     change(q('#eoBasis'), (c, el) => { c.basis = el.value; });
     change(q('#eoDec'), (c, el) => { c.dec = Math.max(0, Math.min(3, +el.value || 0)); });
     change(q('#eoJournal'), (c, el) => { c.journal = el.value.trim(); });
@@ -399,13 +410,13 @@ const Indemnity = (() => {
 
     // Single employee form: live result without re-rendering (keeps the cursor).
     root.querySelectorAll('[data-ef]').forEach(el => el.addEventListener('input', () => {
-      st.form[el.dataset.ef] = el.type === 'number' ? (el.value === '' ? '' : +el.value) : el.value.trim();
+      st.form[el.dataset.ef] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? (el.value === '' ? '' : +el.value) : el.value.trim();
       const out = q('#eoOneOut'); if (out) out.innerHTML = oneOut(cfg());
     }));
     q('#eoAdd').addEventListener('click', () => {
       const f = st.form, x = calc(f, cfg());
       if (!x.ok) { U.toast(t(x.err)); return; }
-      const e = { code: f.code || '', name: f.name, join: f.join, basic: +f.basic || 0, allow: +f.allow || 0, unpaid: +f.unpaid || 0, paid: +f.paid || 0, prev: +f.prev || 0 };
+      const e = { code: f.code || '', name: f.name, join: f.join, basic: +f.basic || 0, allow: +f.allow || 0, unpaid: +f.unpaid || 0, plus1: !!f.plus1, paid: +f.paid || 0, prev: +f.prev || 0 };
       const cur = st.emps.find(z => z.id === st.editId);
       if (cur) Object.assign(cur, e); else st.emps.push(Object.assign({ id: U.uid() }, e));
       st.form = {}; st.editId = null; App.rerender();
@@ -413,7 +424,7 @@ const Indemnity = (() => {
     const fc = q('#eoFormClear'); if (fc) fc.addEventListener('click', () => { st.form = {}; st.editId = null; App.rerender(); });
     root.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
       const e = st.emps.find(z => z.id === b.dataset.edit); if (!e) return;
-      st.form = { code: e.code, name: e.name, join: e.join, basic: e.basic, allow: e.allow || '', unpaid: e.unpaid || '', paid: e.paid || '', prev: e.prev || '' };
+      st.form = { code: e.code, name: e.name, join: e.join, basic: e.basic, allow: e.allow || '', unpaid: e.unpaid || '', plus1: !!e.plus1, paid: e.paid || '', prev: e.prev || '' };
       st.editId = e.id; App.rerender();
       const nm = document.querySelector('[data-ef="name"]'); if (nm) { nm.scrollIntoView({ block: 'center' }); nm.focus(); }
     }));
