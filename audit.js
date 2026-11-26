@@ -586,76 +586,125 @@ const Audit = (() => {
   /* ---------- Excel ---------- */
   function numFmt(dec) { return dec ? `#,##0.${'0'.repeat(dec)};-#,##0.${'0'.repeat(dec)};"-"` : '#,##0;-#,##0;"-"'; }
 
-  function yearSheet(m, year) {
+  // Look of the export (needs the styled SheetJS build, loaded by AgedECL only when exporting; plain without it).
+  const XS = (() => {
+    const BR = '714B67', thin = { style: 'thin', color: { rgb: 'D9D9D9' } }, box = { top: thin, bottom: thin, left: thin, right: thin };
+    const mk = (font, fill, extra) => Object.assign({ font: Object.assign({ name: 'Calibri', sz: 10 }, font), border: box }, fill ? { fill: { fgColor: { rgb: fill } } } : {}, extra || {});
+    return {
+      title: { font: { name: 'Calibri', bold: true, sz: 15, color: { rgb: BR } } },
+      company: { font: { name: 'Calibri', bold: true, sz: 12 } },
+      sub: { font: { name: 'Calibri', italic: true, sz: 10, color: { rgb: '595959' } } },
+      band: mk({ bold: true, color: { rgb: 'FFFFFF' } }, '5A3A52', { alignment: { horizontal: 'center', vertical: 'center' } }),
+      head: mk({ bold: true, color: { rgb: 'FFFFFF' } }, BR, { alignment: { horizontal: 'center', vertical: 'center', wrapText: true } }),
+      headL: mk({ bold: true, color: { rgb: 'FFFFFF' } }, BR, { alignment: { horizontal: 'left', vertical: 'center' } }),
+      group0: mk({ bold: true, sz: 11, color: { rgb: BR } }, 'E4D5E0'),
+      group1: mk({ bold: true, color: { rgb: BR } }, 'F3ECF1'),
+      acc: mk({ bold: true }, 'F2F2F2'),
+      part: mk({ color: { rgb: '404040' } }),
+      partName: mk({ color: { rgb: '404040' } }, null, { alignment: { indent: 1 } }),
+      nop: mk({ italic: true, color: { rgb: '7F7F7F' } }, null, { alignment: { indent: 1 } }),
+      total: mk({ bold: true, sz: 11 }, 'D9D9D9', { border: { top: { style: 'thin', color: { rgb: '000000' } }, bottom: { style: 'double', color: { rgb: '000000' } }, left: thin, right: thin } }),
+      ok: mk({ bold: true, color: { rgb: '1F7A4D' } }, 'E5F4EC'),
+      bad: mk({ bold: true, color: { rgb: '9C0006' } }, 'FFC7CE'),
+      cell: mk({}),
+    };
+  })();
+  // Apply a style per row kind to columns 0..last; empty cells get the same fill so each row reads as one band.
+  function paint(X, ws, kinds, last, z, numFrom) {
+    kinds.forEach((k, r) => {
+      if (!k) return;
+      for (let c = 0; c <= last; c++) {
+        const ref = X.utils.encode_cell({ r, c });
+        let st = typeof k === 'function' ? k(c) : XS[k];
+        if (!st) continue;
+        if (!ws[ref]) { if (['title', 'company', 'sub'].includes(k)) continue; ws[ref] = { t: 's', v: '' }; }
+        const cell = ws[ref];
+        if (cell.t === 'n' && c >= numFrom) { cell.z = z; st = Object.assign({}, st, { numFmt: z, alignment: { horizontal: 'right' } }); }
+        cell.s = st;
+      }
+    });
+  }
+
+  function yearSheet(m, year, X = XLSX) {
     const tb = tbFor(m, `${year}-01-01`, `${year}-12-31`);
     const v = x => x / m.UNIT;
     const six = (o, d, c, cl) => { const [oD, oC] = split(o), [clD, clC] = split(cl); return [oD, oC, d, c, clD, clC].map(v); };
     const aoa = [
-      [t('au_tb_title'), '', App.company().name],
+      [t('au_tb_title')],
+      [App.company().name],
       [t('au_period_x', { a: fd(tb.from), b: fd(tb.to) })],
       [],
       ['', '', '', t('au_opening'), '', t('au_movement', { y: year }), '', t('au_closing'), ''],
       [t('au_code'), t('au_account'), t('h_partner'), t('role_debit'), t('role_credit'), t('role_debit'), t('role_credit'), t('role_debit'), t('role_credit')],
     ];
+    const kinds = ['title', 'company', 'sub', null, 'band', c => (c < 3 ? XS.headL : XS.head)];
     const HEAD = aoa.length;
     const rowsMeta = [];
+    rowsMeta[0] = { hpt: 22 }; rowsMeta[4] = { hpt: 18 }; rowsMeta[5] = { hpt: 18 };
     for (const it of tb.items) {
       if (it.type === 'group') {
         const g = it.s;
         aoa.push(['', '  '.repeat(it.depth) + (it.g.none ? it.g.name : `${it.g.from}-${it.g.to} ${it.g.name}`), '', ...[g.oD, g.oC, g.d, g.c, g.clD, g.clC].map(v)]);
-        rowsMeta[aoa.length - 1] = {};
+        kinds[aoa.length - 1] = it.depth ? 'group1' : 'group0';
         continue;
       }
       const a = it.a;
       aoa.push([a.show, a.name, '', ...six(a.o, a.d, a.c, a.cl)]);
+      kinds[aoa.length - 1] = 'acc';
       for (const x of a.parts) {
         aoa.push(['', '', pName(x.p), ...six(x.o, x.d, x.c, x.cl)]);
         rowsMeta[aoa.length - 1] = { level: 1 };
+        kinds[aoa.length - 1] = x.p === NOP ? (c => (c === 2 ? XS.nop : XS.part)) : (c => (c === 2 ? XS.partName : XS.part));
       }
     }
     const s = tb.total;
     aoa.push(['', t('au_total'), '', ...[s.oD, s.oC, s.d, s.c, s.clD, s.clC].map(v)]);
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    const z = numFmt(m.dec);
-    for (let r = HEAD; r < aoa.length; r++) {
-      for (let c = 3; c < 9; c++) { const cell = ws[XLSX.utils.encode_cell({ r, c })]; if (cell && cell.t === 'n') cell.z = z; }
-    }
+    kinds[aoa.length - 1] = 'total';
+    rowsMeta[aoa.length - 1] = { hpt: 18 };
+    const ws = X.utils.aoa_to_sheet(aoa);
+    paint(X, ws, kinds, 8, numFmt(m.dec), 3);
     ws['!cols'] = [12, 46, 40, 15, 15, 15, 15, 15, 15].map(w => ({ wch: w }));
     ws['!rows'] = Array.from({ length: aoa.length }, (_, i) => rowsMeta[i] || {});
-    ws['!merges'] = [{ s: { r: 3, c: 3 }, e: { r: 3, c: 4 } }, { s: { r: 3, c: 5 }, e: { r: 3, c: 6 } }, { s: { r: 3, c: 7 }, e: { r: 3, c: 8 } }];
+    ws['!merges'] = [0, 1, 2].map(r => ({ s: { r, c: 0 }, e: { r, c: 8 } }))
+      .concat([{ s: { r: 4, c: 0 }, e: { r: 4, c: 2 } }, { s: { r: 4, c: 3 }, e: { r: 4, c: 4 } }, { s: { r: 4, c: 5 }, e: { r: 4, c: 6 } }, { s: { r: 4, c: 7 }, e: { r: 4, c: 8 } }]);
     ws['!autofilter'] = { ref: `A${HEAD}:I${aoa.length}` };
     return { ws, aoa };
   }
 
-  function checkSheet(m) {
-    const aoa = [[t('au_check_tab')], []];
+  function checkSheet(m, X = XLSX) {
+    const aoa = [[t('au_check_tab')], [App.company().name], []];
+    const kinds = ['title', 'company', null];
     const v = x => x / m.UNIT;
     for (const x of m.tbs.map(tb => compare(m, tb))) {
-      aoa.push([t('au_check_for', { f: x.tb.name, a: fd(x.tb.from), b: fd(x.tb.to) })]);
-      if (!x.diffs.length) aoa.push([t('au_match_all', { n: x.n })]);
+      aoa.push([t('au_check_for', { f: x.tb.name, a: fd(x.tb.from), b: fd(x.tb.to) })]); kinds[aoa.length - 1] = 'company';
+      if (!x.diffs.length) { aoa.push(['✓ ' + t('au_match_all', { n: x.n })]); kinds[aoa.length - 1] = 'ok'; }
       else {
-        aoa.push([t('au_match_some', { n: x.accounts, m: x.n })]);
+        aoa.push([t('au_match_some', { n: x.accounts, m: x.n })]); kinds[aoa.length - 1] = 'bad';
         aoa.push([t('au_code'), t('au_account'), t('au_what'), t('au_odoo'), t('au_this_tool'), t('au_diff')]);
-        for (const d of x.diffs) aoa.push([d.code, d.name, d.what, v(d.odoo), v(d.me), v(d.diff)]);
+        kinds[aoa.length - 1] = c => (c < 3 ? XS.headL : XS.head);
+        for (const d of x.diffs) { aoa.push([d.code, d.name, d.what, v(d.odoo), v(d.me), v(d.diff)]); kinds[aoa.length - 1] = c => (c === 5 ? XS.bad : XS.cell); }
       }
       aoa.push([]);
     }
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    const z = numFmt(m.dec);
-    for (let r = 0; r < aoa.length; r++) for (let c = 3; c < 6; c++) { const cell = ws[XLSX.utils.encode_cell({ r, c })]; if (cell && cell.t === 'n') cell.z = z; }
+    const ws = X.utils.aoa_to_sheet(aoa);
+    paint(X, ws, kinds, 5, numFmt(m.dec), 3);
+    ws['!merges'] = aoa.map((r, i) => (['ok', 'bad'].includes(kinds[i]) ? { s: { r: i, c: 0 }, e: { r: i, c: 5 } } : null)).filter(Boolean);
     ws['!cols'] = [12, 46, 18, 16, 16, 16].map(w => ({ wch: w }));
     return ws;
   }
 
   async function exportXlsx() {
     const m = model();
-    const wb = XLSX.utils.book_new();
+    const btn = document.getElementById('auXlsx'); if (btn) btn.disabled = true;
+    const X = await AgedECL.xl.lib().catch(() => XLSX);
+    if (btn) btn.disabled = false;
+    const wb = X.utils.book_new();
     let last = null;
-    for (const y of m.years) { const { ws, aoa } = yearSheet(m, y); XLSX.utils.book_append_sheet(wb, ws, y); last = aoa; }
-    if (m.tbs.length) XLSX.utils.book_append_sheet(wb, checkSheet(m), t('au_check_sheet').slice(0, 31));
+    for (const y of m.years) { const { ws, aoa } = yearSheet(m, y, X); X.utils.book_append_sheet(wb, ws, y); last = aoa; }
+    if (m.tbs.length) X.utils.book_append_sheet(wb, checkSheet(m, X), t('au_check_sheet').slice(0, 31));
     const yrs = m.years.length > 1 ? `${m.years[0]}-${m.years[m.years.length - 1]}` : m.years[0];
     const name = `TB-by-Partner-${U.safeName(App.company().name)}-${yrs}.xlsx`;
-    const res = await U.download(name, new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+    const res = await U.download(name, new Uint8Array(X.write(wb, { type: 'array', bookType: 'xlsx' })));
     if (String(res).startsWith('unavailable')) {
       const sel = /^\d{4}$/.test(st.tab) ? yearSheet(m, st.tab).aoa : last;
       U.copyDialog({ message: t('save_failed_msg'), text: U.toTSV(sel), reason: String(res).split(':')[1] });
