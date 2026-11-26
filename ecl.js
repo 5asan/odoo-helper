@@ -117,8 +117,11 @@ const AgedECL = (() => {
     });
     const on = new Set(m.accounts.filter(a => a.on).map(a => a.code));
     m.multi = on.size > 1;
-    m.aged = all.filter(r => on.has(r.code));
-    m.base = m.aged.filter(r => r.total > 0);   // ECL is for customers who owe us; credit balances are left out
+    // A customer with a credit balance has paid in advance: left out of both the aging and the ECL
+    // (listed only to reconcile the aging with the ledger).
+    m.aged = all.filter(r => on.has(r.code) && r.total > 0);
+    m.credits = all.filter(r => on.has(r.code) && r.total < 0);
+    m.base = m.aged;
     m.baseTotals = sumBands(m.base);
 
     // History: one row per year-end from the start year to the current year.
@@ -276,7 +279,7 @@ const AgedECL = (() => {
       <div class="card">
         <div class="stats">
           <div class="stat"><b>${money(m.aged.reduce((s, r) => s + r.total, 0), m) || '0'}</b><span>${t('ecl_s_aged')}</span></div>
-          <div class="stat"><b>${money(m.baseTotals.reduce((s, x) => s + x, 0), m) || '0'}</b><span>${t('ecl_s_base')}</span></div>
+          ${m.credits.length ? `<div class="stat"><b>${money(m.credits.reduce((s, r) => s + r.total, 0), m)}</b><span>${t('ecl_s_credits', { n: m.credits.length })}</span></div>` : ''}
           <div class="stat"><b>${money(m.eclTotal, m) || '0'}</b><span>${t('ecl_s_ecl')}</span></div>
           <div class="stat"><b>${money(m.recorded, m) || '0'}</b><span>${t('ecl_s_recorded')}</span></div>
           <div class="stat"><b>${money(m.required, m) || '0'}</b><span>${t(m.required >= 0 ? 'ecl_s_more' : 'ecl_s_less')}</span></div>
@@ -292,18 +295,20 @@ const AgedECL = (() => {
   const bandCells = (m, b, tot) => b.map(v => `<td class="num">${money(v, m)}</td>`).join('') + `<td class="num"><b>${money(tot, m) || '0'}</b></td>`;
 
   function renderAged(m) {
-    const codes = [...new Set(m.aged.map(r => r.code))];
+    const codes = [...new Set([...m.aged, ...m.credits].map(r => r.code))];
     if (!codes.length) return `<p class="muted">${t('ecl_nothing')}</p>`;
     return codes.map(code => {
-      const rs = m.aged.filter(r => r.code === code);
+      const rs = m.aged.filter(r => r.code === code), cr = m.credits.filter(r => r.code === code);
       const tot = sumBands(rs);
       return `
         <h3 style="margin:14px 0 6px">${U.esc(accLabel(m, code))}</h3>
-        <div class="table-wrap ecl-wide"><table>
+        ${rs.length ? `<div class="table-wrap ecl-wide"><table>
           <thead><tr><th>${t('h_partner')}</th>${bandHead()}</tr></thead>
-          <tbody>${rs.map(r => `<tr class="${r.total < 0 ? 'ecl-credit' : ''}"><td>${U.esc(pName(r.p))}${r.total < 0 ? ` <span class="badge soon">${t('ecl_credit_bal')}</span>` : ''}</td>${bandCells(m, r.bands, r.total)}</tr>`).join('')}
+          <tbody>${rs.map(r => `<tr><td>${U.esc(pName(r.p))}</td>${bandCells(m, r.bands, r.total)}</tr>`).join('')}
             <tr class="au-total"><td>${t('au_total')}</td>${bandCells(m, tot, tot.reduce((s, x) => s + x, 0))}</tr></tbody>
-        </table></div>`;
+        </table></div>` : `<p class="muted">${t('ecl_nothing')}</p>`}
+        ${cr.length ? `<details class="ecl-credits"><summary class="muted small">${t('ecl_credits_excl', { n: cr.length, v: money(cr.reduce((s, x) => s + x.total, 0), m) })}</summary>
+          <ul class="small">${cr.map(x => `<li>${U.esc(pName(x.p))}: ${money(x.total, m)}</li>`).join('')}</ul></details>` : ''}`;
     }).join('') + `<p class="muted small">${t('ecl_aged_hint')}</p>`;
   }
 
@@ -361,175 +366,253 @@ const AgedECL = (() => {
       </table></div>`;
   }
 
-  /* ---------- Excel (live formulas, like the working sheet the auditor gets) ---------- */
+  /* ---------- Excel (live formulas and a clean, styled layout for the auditor) ---------- */
+  // Styles need the "xlsx-js-style" build of SheetJS. It is loaded only when exporting and kept apart from the
+  // normal XLSX (used for reading files). Without it the export still works, just without colours.
+  let X = window.XLSX, styledP = null;
+  function styledLib() {
+    if (!styledP) styledP = new Promise(resolve => {
+      const orig = window.XLSX;
+      const el = document.createElement('script');
+      el.src = 'https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js';
+      const done = ok => { const lib = window.XLSX; window.XLSX = orig; resolve(ok && lib && lib !== orig ? lib : orig); };
+      el.onload = () => done(true);
+      el.onerror = () => done(false);
+      setTimeout(() => done(false), 15000);
+      document.head.appendChild(el);
+    });
+    return styledP;
+  }
+
+  const BRAND = '714B67', SOFT = 'F3ECF1', GREY = 'F2F2F2', LINE = 'BFBFBF';
+  const thin = { style: 'thin', color: { rgb: LINE } };
+  const box = { top: thin, bottom: thin, left: thin, right: thin };
+  const ST = {
+    title: { font: { bold: true, sz: 15, color: { rgb: BRAND } } },
+    company: { font: { bold: true, sz: 12 } },
+    sub: { font: { italic: true, color: { rgb: '595959' } } },
+    section: { font: { bold: true, sz: 12, color: { rgb: BRAND } } },
+    head: { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: BRAND } }, alignment: { horizontal: 'center', vertical: 'center', wrapText: true }, border: box },
+    headL: { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: BRAND } }, alignment: { horizontal: 'left', vertical: 'center', wrapText: true }, border: box },
+    account: { font: { bold: true, color: { rgb: BRAND } }, fill: { fgColor: { rgb: SOFT } }, border: box },
+    partner: { font: { bold: true }, border: box },
+    item: { font: { sz: 10, color: { rgb: '595959' } }, border: box },
+    itemName: { font: { sz: 10, color: { rgb: '595959' } }, alignment: { indent: 2 }, border: box },
+    cell: { border: box },
+    label: { font: { bold: true }, border: box },
+    total: { font: { bold: true }, fill: { fgColor: { rgb: GREY } }, border: { top: { style: 'thin', color: { rgb: '000000' } }, bottom: { style: 'double', color: { rgb: '000000' } }, left: thin, right: thin } },
+    key: { font: { bold: true }, fill: { fgColor: { rgb: 'FFF2CC' } }, border: box },
+    result: { font: { bold: true, sz: 12 }, fill: { fgColor: { rgb: 'FCE4D6' } }, border: { top: { style: 'medium', color: { rgb: '000000' } }, bottom: { style: 'medium', color: { rgb: '000000' } }, left: thin, right: thin } },
+    ok: { font: { bold: true, color: { rgb: '1F7A4D' } }, fill: { fgColor: { rgb: 'E5F4EC' } }, alignment: { horizontal: 'center' }, border: box },
+    note: { font: { italic: true, sz: 9, color: { rgb: '7F7F7F' } } },
+  };
+  const withFmt = (st, z) => (z ? Object.assign({}, st || {}, { numFmt: z }) : st);
+
   function sheet() {
     const ws = {}; let maxR = 0, maxC = 0;
-    const rows = [];
-    const put = (r, c, cell) => { if (!cell) return; ws[XLSX.utils.encode_cell({ r, c })] = cell; maxR = Math.max(maxR, r); maxC = Math.max(maxC, c); };
-    const s = (r, c, v) => put(r, c, v === '' || v == null ? null : { t: 's', v: String(v) });
-    const nv = (r, c, v, z) => put(r, c, { t: 'n', v, z });
-    const fm = (r, c, f, v, z) => put(r, c, typeof v === 'boolean' ? { t: 'b', v, f } : { t: 'n', v, f, z });
-    const done = (cols) => {
-      ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: maxC } });
+    const rows = [], merges = [];
+    const put = (r, c, cell) => { ws[X.utils.encode_cell({ r, c })] = cell; maxR = Math.max(maxR, r); maxC = Math.max(maxC, c); };
+    const s = (r, c, v, st) => put(r, c, { t: 's', v: v == null ? '' : String(v), s: st });
+    const nv = (r, c, v, z, st) => put(r, c, { t: 'n', v, z, s: withFmt(st, z) });
+    const fm = (r, c, f, v, z, st) => put(r, c, typeof v === 'boolean' ? { t: 'b', v, f, s: st } : { t: 'n', v, f, z, s: withFmt(st, z) });
+    // Give empty cells of a row the same look (fill, borders) so the row reads as one band.
+    const paint = (r, c0, c1, st) => { for (let c = c0; c <= c1; c++) { const k = X.utils.encode_cell({ r, c }); if (!ws[k]) put(r, c, { t: 's', v: '', s: st }); } };
+    const merge = (r, c0, c1) => merges.push({ s: { r, c: c0 }, e: { r, c: c1 } });
+    const height = (r, hpt) => { rows[r] = Object.assign({}, rows[r], { hpt }); };
+    const done = cols => {
+      ws['!ref'] = X.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: maxC } });
       ws['!cols'] = cols.map(w => ({ wch: w }));
-      ws['!rows'] = rows;
+      ws['!rows'] = Array.from({ length: maxR + 1 }, (_, i) => rows[i] || {});
+      ws['!merges'] = merges;
       return ws;
     };
-    return { ws, s, nv, fm, done, rows };
+    return { ws, s, nv, fm, paint, merge, height, done, rows };
   }
-  const col = c => XLSX.utils.encode_col(c);
+  const col = c => X.utils.encode_col(c);
   const A1 = (r, c, abs) => (abs ? `$${col(c)}$${r + 1}` : `${col(c)}${r + 1}`);
+  function amtFmt(m) { return m.dec ? `#,##0.${'0'.repeat(m.dec)};(#,##0.${'0'.repeat(m.dec)});"-"` : '#,##0;(#,##0);"-"'; }
+
+  function header(S, m, title, lastCol) {
+    S.s(0, 0, title, ST.title); S.merge(0, 0, lastCol); S.height(0, 24);
+    S.s(1, 0, App.company().name, ST.company); S.merge(1, 0, lastCol);
+    S.s(2, 0, `${t('ecl_asof_x', { d: fd(m.asOf) })}  ·  ${t('ecl_x_accounts', { a: m.accounts.filter(a => a.on).map(a => accLabel(m, a.code)).join(', ') })}`, ST.sub);
+    S.merge(2, 0, lastCol);
+  }
 
   function agedSheet(m) {
     const S = sheet(), z = amtFmt(m), v = x => x / m.UNIT;
-    S.s(0, 0, t('ecl_aged_title')); S.s(0, 2, App.company().name);
-    S.s(1, 0, t('ecl_asof_x', { d: fd(m.asOf) }));
-    let r = 3;
-    S.s(r, 0, t('ecl_x_partner')); S.s(r, 1, t('h_date')); S.s(r, 2, t('h_label'));
-    for (let i = 0; i < NB; i++) S.s(r, 3 + i, bandLabel(i));
-    S.s(r, 3 + NB, t('au_total'));
+    const C0 = 3, CT = C0 + NB, LAST = CT;          // A partner/entry, B date, C label, D..I bands, J total
+    header(S, m, t('ecl_aged_title'), LAST);
+    let r = 4;
+    S.s(r, 0, t('ecl_x_partner'), ST.headL); S.s(r, 1, t('h_date'), ST.head); S.s(r, 2, t('h_label'), ST.headL);
+    for (let i = 0; i < NB; i++) S.s(r, C0 + i, bandLabel(i), ST.head);
+    S.s(r, CT, t('au_total'), ST.head); S.height(r, 30);
     r++;
     const accTotals = [];
     for (const code of [...new Set(m.aged.map(x => x.code))]) {
-      S.s(r, 0, accLabel(m, code)); r++;
+      S.s(r, 0, accLabel(m, code), ST.account); S.paint(r, 1, LAST, ST.account); r++;
       const partnerRows = [];
       for (const row of m.aged.filter(x => x.code === code)) {
         const pr = r;
-        S.s(r, 0, pName(row.p));
+        S.s(r, 0, pName(row.p), ST.partner); S.paint(r, 1, 2, ST.partner);
         partnerRows.push(pr);
         r++;
         for (const it of row.items) {
-          S.s(r, 0, it.move); S.s(r, 1, fd(it.date)); S.s(r, 2, it.label);
-          S.nv(r, 3 + it.band, v(it.amt), z);
-          S.fm(r, 3 + NB, `SUM(${A1(r, 3)}:${A1(r, 2 + NB)})`, v(it.amt), z);
+          S.s(r, 0, it.move, ST.itemName); S.s(r, 1, fd(it.date), ST.item); S.s(r, 2, it.label, ST.item);
+          for (let i = 0; i < NB; i++) if (i !== it.band) S.s(r, C0 + i, '', ST.item);
+          S.nv(r, C0 + it.band, v(it.amt), z, ST.item);
+          S.fm(r, CT, `SUM(${A1(r, C0)}:${A1(r, CT - 1)})`, v(it.amt), z, ST.item);
           S.rows[r] = { level: 1 };
           r++;
         }
-        for (let i = 0; i <= NB; i++) {
-          const c = 3 + i;
-          S.fm(pr, c, `SUM(${A1(pr + 1, c)}:${A1(r - 1, c)})`, v(i < NB ? row.bands[i] : row.total), z);
-        }
+        for (let i = 0; i <= NB; i++) S.fm(pr, C0 + i, `SUM(${A1(pr + 1, C0 + i)}:${A1(r - 1, C0 + i)})`, v(i < NB ? row.bands[i] : row.total), z, ST.partner);
       }
       const tot = sumBands(m.aged.filter(x => x.code === code));
-      S.s(r, 0, `${t('au_total')} ${code}`);
-      for (let i = 0; i <= NB; i++) {
-        const c = 3 + i;
-        S.fm(r, c, partnerRows.map(pr => A1(pr, c)).join('+') || '0', v(i < NB ? tot[i] : tot.reduce((a, b) => a + b, 0)), z);
-      }
+      S.s(r, 0, `${t('au_total')} ${code}`, ST.total); S.paint(r, 1, 2, ST.total);
+      for (let i = 0; i <= NB; i++) S.fm(r, C0 + i, partnerRows.map(p => A1(p, C0 + i)).join('+') || '0', v(i < NB ? tot[i] : tot.reduce((a, b) => a + b, 0)), z, ST.total);
       accTotals.push(r);
       r += 2;
     }
+    let grand = accTotals[0];
     if (accTotals.length > 1) {
       const all = sumBands(m.aged);
-      S.s(r, 0, t('au_total'));
-      for (let i = 0; i <= NB; i++) S.fm(r, 3 + i, accTotals.map(x => A1(x, 3 + i)).join('+'), v(i < NB ? all[i] : all.reduce((a, b) => a + b, 0)), z);
+      S.s(r, 0, t('au_total'), ST.result); S.paint(r, 1, 2, ST.result);
+      for (let i = 0; i <= NB; i++) S.fm(r, C0 + i, accTotals.map(x => A1(x, C0 + i)).join('+'), v(i < NB ? all[i] : all.reduce((a, b) => a + b, 0)), z, ST.result);
+      grand = r; r += 2;
     }
-    return S.done([46, 12, 50, 14, 14, 14, 14, 14, 14, 15]);
-  }
 
-  function amtFmt(m) { return m.dec ? `#,##0.${'0'.repeat(m.dec)};-#,##0.${'0'.repeat(m.dec)};"-"` : '#,##0;-#,##0;"-"'; }
+    // Reconciliation to the ledger: customers with a credit balance (paid in advance) are left out of the aging.
+    if (grand != null || m.credits.length) {
+      S.s(r, 0, t('ecl_x_recon'), ST.section); r++;
+      const agedTot = m.aged.reduce((a, x) => a + x.total, 0);
+      S.s(r, 0, t('ecl_x_recon_aged'), ST.label); S.paint(r, 1, CT - 1, ST.cell); S.merge(r, 0, CT - 1);
+      if (grand != null) S.fm(r, CT, A1(grand, CT), v(agedTot), z, ST.label); else S.nv(r, CT, 0, z, ST.label);
+      const ra = r; r++;
+      for (const x of m.credits) {
+        S.s(r, 0, `${rowLabel(m, x)} — ${t('ecl_credit_bal')}`, ST.cell); S.paint(r, 1, CT - 1, ST.cell); S.merge(r, 0, CT - 1);
+        S.nv(r, CT, v(x.total), z, ST.cell); r++;
+      }
+      S.s(r, 0, t('ecl_x_recon_ledger'), ST.total); S.paint(r, 1, CT - 1, ST.total); S.merge(r, 0, CT - 1);
+      S.fm(r, CT, `SUM(${A1(ra, CT)}:${A1(r - 1, CT)})`, v(agedTot + m.credits.reduce((a, x) => a + x.total, 0)), z, ST.total);
+      r += 2;
+    }
+    S.s(r, 0, t('ecl_x_note_aged'), ST.note); S.merge(r, 0, LAST);
+    return S.done([50, 12, 46, 15, 15, 15, 15, 15, 15, 16]);
+  }
 
   function eclSheet(m) {
     const S = sheet(), z = amtFmt(m), P = '0.00%', v = x => x / m.UNIT;
-    const B0 = 1, TOT = B0 + NB;                  // bands in columns B..G, total in H
+    const B0 = 1, TOT = B0 + NB, LAST = TOT + 1;     // bands in B..G, total in H, notes in I
     const sumRow = r => `SUM(${A1(r, B0)}:${A1(r, B0 + NB - 1)})`;
-    const head = r => { for (let i = 0; i < NB; i++) S.s(r, B0 + i, bandLabel(i)); S.s(r, TOT, t('ecl_x_total')); };
-    S.s(0, 0, t('ecl_x_title')); S.s(0, 3, App.company().name);
-    S.s(1, 0, t('ecl_asof_x', { d: fd(m.asOf) }));
-    S.s(2, 0, t('ecl_x_accounts', { a: m.accounts.filter(a => a.on).map(a => accLabel(m, a.code)).join(', ') }));
+    const head = (r, first) => {
+      S.s(r, 0, first, ST.headL);
+      for (let i = 0; i < NB; i++) S.s(r, B0 + i, bandLabel(i), ST.head);
+      S.s(r, TOT, t('ecl_x_total'), ST.head); S.height(r, 30);
+    };
+    header(S, m, t('ecl_x_title'), LAST);
 
     // 1. Customers with a debit balance, by band.
     let r = 4;
-    S.s(r, 0, t('ecl_x_partner')); head(r); r++;
+    S.s(r, 0, t('ecl_x_s1'), ST.section); r++;
+    head(r, t('ecl_x_partner')); r++;
     const first = r;
     for (const row of m.base) {
-      S.s(r, 0, rowLabel(m, row));
-      row.bands.forEach((x, i) => S.nv(r, B0 + i, v(x), z));
-      S.fm(r, TOT, sumRow(r), v(row.total), z);
+      S.s(r, 0, rowLabel(m, row), ST.cell);
+      row.bands.forEach((x, i) => S.nv(r, B0 + i, v(x), z, ST.cell));
+      S.fm(r, TOT, sumRow(r), v(row.total), z, ST.label);
       row.xr = r; r++;
     }
     const T = r;
-    S.s(T, 0, t('au_total'));
-    for (let i = 0; i < NB; i++) S.fm(T, B0 + i, m.base.length ? `SUM(${A1(first, B0 + i)}:${A1(T - 1, B0 + i)})` : '0', v(m.baseTotals[i]), z);
-    S.fm(T, TOT, sumRow(T), v(m.baseTotals.reduce((a, b) => a + b, 0)), z);
+    S.s(T, 0, t('au_total'), ST.total);
+    for (let i = 0; i < NB; i++) S.fm(T, B0 + i, m.base.length ? `SUM(${A1(first, B0 + i)}:${A1(T - 1, B0 + i)})` : '0', v(m.baseTotals[i]), z, ST.total);
+    S.fm(T, TOT, sumRow(T), v(m.baseTotals.reduce((a, b) => a + b, 0)), z, ST.total);
 
     // 2. History of year-end aging, average and share per band.
     r = T + 2;
-    S.s(r, 0, t('ecl_year')); head(r); S.s(r, TOT + 1, t('ecl_source')); r++;
+    S.s(r, 0, t('ecl_x_s2'), ST.section); r++;
+    head(r, t('ecl_year')); S.s(r, TOT + 1, t('ecl_source'), ST.head); r++;
     const h0 = r;
     for (const h of m.hist) {
-      S.s(r, 0, h.year);
-      h.v.forEach((x, i) => (h.src === 'current' ? S.fm(r, B0 + i, A1(T, B0 + i), v(x), z) : S.nv(r, B0 + i, v(x), z)));
-      S.fm(r, TOT, sumRow(r), v(h.v.reduce((a, b) => a + b, 0)), z);
-      S.s(r, TOT + 1, t(h.src === 'current' ? 'ecl_src_current' : h.src === 'gl' ? 'ecl_src_gl' : 'ecl_src_manual'));
+      S.s(r, 0, h.year, ST.label);
+      h.v.forEach((x, i) => (h.src === 'current' ? S.fm(r, B0 + i, A1(T, B0 + i), v(x), z, ST.cell) : S.nv(r, B0 + i, v(x), z, ST.cell)));
+      S.fm(r, TOT, sumRow(r), v(h.v.reduce((a, b) => a + b, 0)), z, ST.label);
+      S.s(r, TOT + 1, t(h.src === 'current' ? 'ecl_src_current' : h.src === 'gl' ? 'ecl_src_gl' : 'ecl_src_manual'), ST.item);
       r++;
     }
     const AVG = r, SH = r + 1;
-    S.s(AVG, 0, t('ecl_avg'));
-    for (let i = 0; i < NB; i++) S.fm(AVG, B0 + i, `AVERAGE(${A1(h0, B0 + i)}:${A1(AVG - 1, B0 + i)})`, v(m.avg[i]), z);
-    S.fm(AVG, TOT, sumRow(AVG), v(m.avg.reduce((a, b) => a + b, 0)), z);
-    S.s(SH, 0, t('ecl_share'));
-    for (let i = 0; i < NB; i++) S.fm(SH, B0 + i, `IF(${A1(AVG, TOT, true)}=0,0,${A1(AVG, B0 + i)}/${A1(AVG, TOT, true)})`, m.share[i], P);
-    S.fm(SH, TOT, sumRow(SH), m.share.reduce((a, b) => a + b, 0), P);
+    S.s(AVG, 0, t('ecl_avg'), ST.key);
+    for (let i = 0; i < NB; i++) S.fm(AVG, B0 + i, `AVERAGE(${A1(h0, B0 + i)}:${A1(AVG - 1, B0 + i)})`, v(m.avg[i]), z, ST.key);
+    S.fm(AVG, TOT, sumRow(AVG), v(m.avg.reduce((a, b) => a + b, 0)), z, ST.key);
+    S.s(SH, 0, t('ecl_share'), ST.key);
+    for (let i = 0; i < NB; i++) S.fm(SH, B0 + i, `IF(${A1(AVG, TOT, true)}=0,0,${A1(AVG, B0 + i)}/${A1(AVG, TOT, true)})`, m.share[i], P, ST.key);
+    S.fm(SH, TOT, sumRow(SH), m.share.reduce((a, b) => a + b, 0), P, ST.key);
 
     // 3. Forward-looking assumptions.
     r = SH + 2;
-    S.s(r, 0, t('ecl_x_forward')); r++;
+    S.s(r, 0, t('ecl_x_forward'), ST.section); r++;
     const RI = r;
-    [['ecl_inf', m.rates.inf], ['ecl_ind', m.rates.ind], ['ecl_unemp', m.rates.unemp]].forEach(([k, x], j) => { S.s(RI + j, 0, t(k)); S.nv(RI + j, B0, x / 100, P); });
+    [['ecl_inf', m.rates.inf], ['ecl_ind', m.rates.ind], ['ecl_unemp', m.rates.unemp]].forEach(([k, x], j) => {
+      S.s(RI + j, 0, t(k), ST.cell); S.nv(RI + j, B0, x / 100, P, ST.cell);
+    });
 
     // 4. Provision matrix (Kuwait method).
     r = RI + 4;
-    const MX = r, MO = r + 1, PC = r + 2, GR = r + 3, EC = r + 4, RC = r + 5, RQ = r + 6;
-    S.s(MX, 0, t('ecl_x_max'));
-    S.fm(MX, B0, `${A1(SH, B0 + NB - 1)}+${A1(RI, B0)}+${A1(RI + 1, B0)}+${A1(RI + 2, B0)}`, m.maxRate, P);
-    S.s(MO, 0, t('ecl_months')); WEIGHTS.forEach((w, i) => S.nv(MO, B0 + i, w)); S.fm(MO, TOT, sumRow(MO), WEIGHTS.reduce((a, b) => a + b, 0));
-    S.s(PC, 0, t('ecl_pct'));
-    for (let i = 0; i < NB - 1; i++) S.fm(PC, B0 + i, `${A1(MO, B0 + i)}/${A1(MO, TOT, true)}*${A1(MX, B0, true)}`, m.pct[i], P);
-    S.nv(PC, B0 + NB - 1, 1, P);
-    S.s(GR, 0, t('ecl_gross'));
-    for (let i = 0; i < NB; i++) S.fm(GR, B0 + i, A1(T, B0 + i), v(m.baseTotals[i]), z);
-    S.fm(GR, TOT, sumRow(GR), v(m.baseTotals.reduce((a, b) => a + b, 0)), z);
-    S.s(EC, 0, t('ecl_required'));
-    for (let i = 0; i < NB; i++) S.fm(EC, B0 + i, `${A1(GR, B0 + i)}*${A1(PC, B0 + i)}`, v(m.ecl[i]), z);
-    S.fm(EC, TOT, sumRow(EC), v(m.eclTotal), z);
-    S.s(RC, 0, t('ecl_rec_row')); S.nv(RC, TOT, v(m.recorded), z);
-    if (m.allow) S.s(RC, TOT + 1, `${m.allow.code} ${m.allow.name} (${m.allow.file})`);
-    S.s(RQ, 0, t('ecl_x_req')); S.fm(RQ, TOT, `${A1(EC, TOT)}-${A1(RC, TOT)}`, v(m.required), z);
+    S.s(r, 0, t('ecl_x_s4'), ST.section); r++;
+    const MX = r, HD = r + 1, MO = r + 2, PC = r + 3, GR = r + 4, EC = r + 5, RC = r + 7, RQ = r + 8;
+    S.s(MX, 0, t('ecl_x_max'), ST.key);
+    S.fm(MX, B0, `${A1(SH, B0 + NB - 1)}+${A1(RI, B0)}+${A1(RI + 1, B0)}+${A1(RI + 2, B0)}`, m.maxRate, P, ST.key);
+    head(HD, '');
+    S.s(MO, 0, t('ecl_months'), ST.cell); WEIGHTS.forEach((w, i) => S.nv(MO, B0 + i, w, null, ST.cell)); S.fm(MO, TOT, sumRow(MO), WEIGHTS.reduce((a, b) => a + b, 0), null, ST.label);
+    S.s(PC, 0, t('ecl_pct'), ST.label);
+    for (let i = 0; i < NB - 1; i++) S.fm(PC, B0 + i, `${A1(MO, B0 + i)}/${A1(MO, TOT, true)}*${A1(MX, B0, true)}`, m.pct[i], P, ST.label);
+    S.nv(PC, B0 + NB - 1, 1, P, ST.label); S.paint(PC, TOT, TOT, ST.label);
+    S.s(GR, 0, t('ecl_gross'), ST.cell);
+    for (let i = 0; i < NB; i++) S.fm(GR, B0 + i, A1(T, B0 + i), v(m.baseTotals[i]), z, ST.cell);
+    S.fm(GR, TOT, sumRow(GR), v(m.baseTotals.reduce((a, b) => a + b, 0)), z, ST.label);
+    S.s(EC, 0, t('ecl_required'), ST.total);
+    for (let i = 0; i < NB; i++) S.fm(EC, B0 + i, `${A1(GR, B0 + i)}*${A1(PC, B0 + i)}`, v(m.ecl[i]), z, ST.total);
+    S.fm(EC, TOT, sumRow(EC), v(m.eclTotal), z, ST.total);
+    S.s(RC, 0, t('ecl_rec_row'), ST.cell); S.paint(RC, B0, TOT - 1, ST.cell); S.nv(RC, TOT, v(m.recorded), z, ST.label);
+    if (m.allow) S.s(RC, TOT + 1, `${m.allow.code} ${m.allow.name} (${m.allow.file})`, ST.note);
+    S.s(RQ, 0, t(m.required >= 0 ? 'ecl_req_more' : 'ecl_req_less'), ST.result); S.paint(RQ, B0, TOT - 1, ST.result);
+    S.fm(RQ, TOT, `${A1(EC, TOT)}-${A1(RC, TOT)}`, v(m.required), z, ST.result);
 
     // 5. ECL per customer.
     r = RQ + 2;
-    S.s(r, 0, t('ecl_h_partner')); head(r); r++;
+    S.s(r, 0, t('ecl_x_s5'), ST.section); r++;
+    head(r, t('ecl_x_partner')); r++;
     const p0 = r;
     for (const row of m.base) {
-      S.s(r, 0, rowLabel(m, row));
-      for (let i = 0; i < NB; i++) S.fm(r, B0 + i, `${A1(row.xr, B0 + i)}*${A1(PC, B0 + i, true)}`, v(row.bands[i] * m.pct[i]), z);
-      S.fm(r, TOT, sumRow(r), v(row.bands.reduce((a, x, i) => a + x * m.pct[i], 0)), z);
+      S.s(r, 0, rowLabel(m, row), ST.cell);
+      for (let i = 0; i < NB; i++) S.fm(r, B0 + i, `${A1(row.xr, B0 + i)}*${A1(PC, B0 + i, true)}`, v(row.bands[i] * m.pct[i]), z, ST.cell);
+      S.fm(r, TOT, sumRow(r), v(row.bands.reduce((a, x, i) => a + x * m.pct[i], 0)), z, ST.label);
       r++;
     }
     const PT = r;
-    S.s(PT, 0, t('au_total'));
-    for (let i = 0; i <= NB; i++) {
-      const c = B0 + i;
-      S.fm(PT, c, m.base.length ? `SUM(${A1(p0, c)}:${A1(PT - 1, c)})` : '0', v(i < NB ? m.ecl[i] : m.eclTotal), z);
-    }
-    S.s(PT + 1, 0, t('ecl_check'));
-    for (let i = 0; i <= NB; i++) S.fm(PT + 1, B0 + i, `ROUND(${A1(PT, B0 + i)}-${A1(EC, B0 + i)},${m.dec})=0`, true);
-    return S.done([52, 15, 15, 15, 15, 15, 15, 16, 30]);
+    S.s(PT, 0, t('au_total'), ST.total);
+    for (let i = 0; i <= NB; i++) S.fm(PT, B0 + i, m.base.length ? `SUM(${A1(p0, B0 + i)}:${A1(PT - 1, B0 + i)})` : '0', v(i < NB ? m.ecl[i] : m.eclTotal), z, ST.total);
+    S.s(PT + 1, 0, t('ecl_check'), ST.ok);
+    for (let i = 0; i <= NB; i++) S.fm(PT + 1, B0 + i, `ROUND(${A1(PT, B0 + i)}-${A1(EC, B0 + i)},${m.dec})=0`, true, null, ST.ok);
+    S.s(PT + 3, 0, t('ecl_x_note_ecl'), ST.note); S.merge(PT + 3, 0, LAST);
+    return S.done([54, 15, 15, 15, 15, 15, 15, 16, 48]);
   }
 
   async function exportXlsx() {
     const m = model();
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, agedSheet(m), t('ecl_tab_aged').slice(0, 31));
-    XLSX.utils.book_append_sheet(wb, eclSheet(m), t('ecl_tab_ecl').slice(0, 31));
-    const name = `Aged-AR-ECL-${U.safeName(App.company().name)}-${m.year}.xlsx`;
-    const res = await U.download(name, new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
-    if (String(res).startsWith('unavailable')) {
-      const aoa = [[t('h_partner'), ...Array.from({ length: NB }, (_, i) => bandLabel(i)), t('au_total')],
-        ...m.base.map(r => [rowLabel(m, r), ...r.bands.map(x => x / m.UNIT), r.total / m.UNIT])];
-      U.copyDialog({ message: t('save_failed_msg'), text: U.toTSV(aoa), reason: String(res).split(':')[1] });
-    }
+    const btn = document.getElementById('eclXlsx'); if (btn) btn.disabled = true;
+    X = await styledLib();
+    try {
+      const wb = X.utils.book_new();
+      X.utils.book_append_sheet(wb, agedSheet(m), t('ecl_tab_aged').slice(0, 31));
+      X.utils.book_append_sheet(wb, eclSheet(m), t('ecl_tab_ecl').slice(0, 31));
+      const name = `Aged-AR-ECL-${U.safeName(App.company().name)}-${m.year}.xlsx`;
+      const res = await U.download(name, new Uint8Array(X.write(wb, { type: 'array', bookType: 'xlsx' })));
+      if (String(res).startsWith('unavailable')) {
+        const aoa = [[t('h_partner'), ...Array.from({ length: NB }, (_, i) => bandLabel(i)), t('au_total')],
+          ...m.base.map(r => [rowLabel(m, r), ...r.bands.map(x => x / m.UNIT), r.total / m.UNIT])];
+        U.copyDialog({ message: t('save_failed_msg'), text: U.toTSV(aoa), reason: String(res).split(':')[1] });
+      }
+    } finally { if (btn) btn.disabled = false; }
   }
 
   /* ---------- Events ---------- */
