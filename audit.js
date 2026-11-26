@@ -13,6 +13,8 @@ const Audit = (() => {
     partner: /^(partner|الشريك|الجهة|الشريك التجاري)$/i,
     debit: /^(debit|مدين)$/i,
     credit: /^(credit|دائن)$/i,
+    label: /^(communication|label|description|البيان|الوصف|الاتصال)$/i,
+    move: /^(journal entry|entry|number|move|القيد|رقم القيد)$/i,
   };
   const INIT_RE = /^\s*(initial balance|opening balance|الرصيد الافتتاحي|رصيد افتتاحي)/i;
   const TB_RE = /initial balance|end balance|الرصيد الافتتاحي|الرصيد الختامي/i;
@@ -61,7 +63,8 @@ const Audit = (() => {
       const first = re => { const x = all(re); return x.length ? x[0] : -1; };
       const debit = all(RE.debit), credit = all(RE.credit);
       if (!debit.length || !credit.length) continue;
-      return { i, debit, credit, date: first(RE.date), code: first(RE.code), name: first(RE.name), partner: first(RE.partner) };
+      return { i, debit, credit, date: first(RE.date), code: first(RE.code), name: first(RE.name), partner: first(RE.partner),
+        label: first(RE.label), move: first(RE.move) };
     }
     return null;
   }
@@ -128,7 +131,10 @@ const Audit = (() => {
       if (!code) continue;
       const ds = r[hi.debit[0]], cs = r[hi.credit[0]];
       dec = Math.max(dec, decOf(ds), decOf(cs));
-      lines.push({ date, code, p: cleanP(hi.partner >= 0 ? r[hi.partner] : '') || NOP, d: Math.abs(at(r, hi.debit[0])), c: Math.abs(at(r, hi.credit[0])) });
+      // Entry number: its own column (Journal Items) or the "Account Name" column on line rows (GL report).
+      const move = hi.move >= 0 ? r[hi.move] : hi.code >= 0 ? r[nameCol] : '';
+      lines.push({ date, code, p: cleanP(hi.partner >= 0 ? r[hi.partner] : '') || NOP, d: Math.abs(at(r, hi.debit[0])), c: Math.abs(at(r, hi.credit[0])),
+        move: move || '', label: hi.label >= 0 ? r[hi.label] || '' : '' });
     }
     if (!lines.length) throw new Error(t('au_gl_empty'));
     const dates = lines.map(l => l.date).sort();
@@ -421,14 +427,13 @@ const Audit = (() => {
   const fd = iso => U.fmtDate(iso, 'DD/MM/YYYY');
   const pName = p => (p === NOP ? t('au_no_partner') : p);
 
-  function render() {
+  function renderTB() {
     if (st.coId !== App.companyId) {
       Object.assign(st, { coId: App.companyId, files: [], error: '', model: null, tab: null, storedGroups: null, query: '' });
     }
     const has = st.files.length > 0;
     const m = has ? model() : null;
     return `
-      <div class="page-head"><h1>${t('au_title')}</h1><p class="muted">${t('au_sub')}</p></div>
       <div class="card">
         <h2 style="margin-top:0">${t('au_tb_title')}</h2>
         ${has ? renderFiles(m) : `
@@ -650,7 +655,7 @@ const Audit = (() => {
   }
 
   /* ---------- Events ---------- */
-  function mount(root) {
+  function mountTB(root) {
     const q = sel => root.querySelector(sel);
     if (st.storedGroups === null) {
       const co = App.companyId;
@@ -694,5 +699,29 @@ const Audit = (() => {
     const xl = q('#auXlsx'); if (xl) xl.addEventListener('click', exportXlsx);
   }
 
-  return { render, mount, _onFiles: onFiles, _state: st, _tbFor: (from, to) => tbFor(model(), from, to) };
+  /* ---------- Page: pick a report ---------- */
+  const REPORTS = [['tb', 'au_tb_title'], ['ecl', 'ecl_title']];
+  let report = 'tb';
+  try { report = localStorage.getItem('oh_audit_report') || 'tb'; } catch (e) { /* default */ }
+  const cur = () => (report === 'ecl' ? AgedECL : { render: renderTB, mount: mountTB });
+
+  function page() {
+    return `
+      <div class="page-head"><h1>${t('au_title')}</h1><p class="muted">${t('au_sub')}</p></div>
+      <div class="tabs au-reports">${REPORTS.map(([k, label]) => `<button type="button" data-report="${k}" class="${report === k ? 'active' : ''}">${t(label)}</button>`).join('')}</div>
+      ${cur().render()}`;
+  }
+  function mountPage(root) {
+    root.querySelectorAll('[data-report]').forEach(b => b.addEventListener('click', () => {
+      report = b.dataset.report;
+      try { localStorage.setItem('oh_audit_report', report); } catch (e) { /* ignore */ }
+      App.rerender();
+    }));
+    cur().mount(root);
+  }
+
+  return {
+    render: page, mount: mountPage, _onFiles: onFiles, _state: st, _tbFor: (from, to) => tbFor(model(), from, to),
+    io: { readBook, classify, NOP, decOf },
+  };
 })();

@@ -1,0 +1,548 @@
+/* Aged Receivable + ECL working sheet (IFRS 9 provision matrix, the company's own method):
+   - Aging from the AR General Ledger: per account, per partner; payments settle the oldest invoices first (FIFO).
+   - History: year-end aging of every year from the start year to the current one (GL, or typed for years before Odoo).
+   - Max default rate = share of the "> 365 days" band in the average aging + forward-looking rates.
+   - Provision % per band = (1,2,3,4,5 ÷ 15) × max default rate; "> 365 days" = 100%.
+   - Provision already recorded comes from the allowance account in an uploaded Trial Balance (or typed). */
+const AgedECL = (() => {
+  const LIMITS = [30, 60, 90, 180, 365];
+  const NB = 6;
+  const WEIGHTS = [1, 2, 3, 4, 5, 0];
+  const ALLOW_RE = /allowance|expected credit|doubtful|impairment|\becl\b|مخصص|خسائر ائتمانية/i;
+  const DAY = 864e5;
+
+  const st = { coId: null, files: [], busy: '', error: '', model: null, tab: 'aged' };
+
+  /* ---------- Settings (per company) ---------- */
+  const SKEY = 'oh_ecl_settings';
+  const loadAll = () => { try { return JSON.parse(localStorage.getItem(SKEY) || '{}'); } catch (e) { return {}; } };
+  const cfg = () => Object.assign({ year: '', start: 2022, exclude: [], rates: { inf: 0, ind: 0, unemp: 0 }, hist: {}, allow: '', manualProv: '' },
+    loadAll()[App.companyId] || {});
+  function saveCfg(c) {
+    const all = loadAll(); all[App.companyId] = c;
+    try { localStorage.setItem(SKEY, JSON.stringify(all)); } catch (e) { /* ignore */ }
+    st.model = null;
+  }
+
+  const NOP = () => Audit.io.NOP;
+  const pName = p => (p === NOP() ? t('au_no_partner') : p);
+  const bandOf = age => { for (let i = 0; i < LIMITS.length; i++) if (age <= LIMITS[i]) return i; return NB - 1; };
+  const bandLabel = i => t('ecl_b' + (i + 1));
+  const fd = iso => U.fmtDate(iso, 'DD/MM/YYYY');
+
+  /* ---------- Aging ---------- */
+  // FIFO per account + partner: each credit settles the oldest open debit (and the other way round).
+  function aging(m, asOf) {
+    if (m.agingCache[asOf]) return m.agingCache[asOf];
+    const end = Date.parse(asOf + 'T00:00:00Z');
+    const groups = new Map();
+    for (const l of m.lines) {
+      if (l.date > asOf || !l.v) continue;
+      const k = l.code + '\u0001' + l.p;
+      let g = groups.get(k); if (!g) groups.set(k, g = { code: l.code, p: l.p, lines: [] });
+      g.lines.push(l);
+    }
+    const rows = [];
+    for (const g of groups.values()) {
+      g.lines.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.n - b.n));
+      const open = [];
+      for (const l of g.lines) {
+        let v = l.v;
+        while (v && open.length && Math.sign(open[0].amt) !== Math.sign(v)) {
+          const take = Math.min(Math.abs(v), Math.abs(open[0].amt));
+          v -= Math.sign(v) * take;
+          open[0].amt -= Math.sign(open[0].amt) * take;
+          if (!open[0].amt) open.shift();
+        }
+        if (v) open.push({ date: l.date, move: l.move, label: l.label, amt: v });
+      }
+      if (!open.length) continue;
+      const bands = new Array(NB).fill(0);
+      for (const it of open) { it.band = bandOf(Math.round((end - Date.parse(it.date + 'T00:00:00Z')) / DAY)); bands[it.band] += it.amt; }
+      rows.push({ code: g.code, p: g.p, bands, total: bands.reduce((s, x) => s + x, 0), items: open });
+    }
+    rows.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }) || (a.p === NOP()) - (b.p === NOP()) || a.p.localeCompare(b.p));
+    return (m.agingCache[asOf] = rows);
+  }
+
+  const sumBands = rows => rows.reduce((s, r) => s.map((x, i) => x + r.bands[i]), new Array(NB).fill(0));
+
+  /* ---------- Model ---------- */
+  function build() {
+    const c = cfg();
+    const gls = st.files.filter(f => f.kind === 'gl');
+    const tbs = st.files.filter(f => f.kind === 'tb' || f.kind === 'ours');
+    if (!gls.length) return { gls, tbs, empty: true };
+    const tbDec = tbs.map(f => f.dec).find(d => d >= 0);
+    const glDec = Math.max(-1, ...gls.map(f => f.dec));
+    const dec = tbDec != null ? tbDec : glDec >= 0 ? glDec : 2;
+    const UNIT = Math.pow(10, dec);
+    const toInt = v => Math.round(v * UNIT);
+
+    const names = {};
+    for (const f of [...gls, ...tbs]) Object.assign(names, f.names);
+    const lines = [];
+    for (const f of gls) for (const l of f.lines) lines.push({ n: lines.length, date: l.date, code: l.code, p: l.p, v: toInt(l.d) - toInt(l.c), move: l.move || '', label: l.label || '' });
+    const dates = gls.flatMap(f => [f.from, f.to]).sort();
+    const glFrom = dates[0], glTo = dates[dates.length - 1];
+    const years = [];
+    for (let y = +glFrom.slice(0, 4); y <= +glTo.slice(0, 4); y++) years.push(String(y));
+    const year = years.includes(c.year) ? c.year : years[years.length - 1];
+    const asOf = `${year}-12-31`;
+
+    const m = { dec, UNIT, names, lines, glFrom, glTo, years, year, asOf, gls, tbs, agingCache: {} };
+    const all = aging(m, asOf);
+    const codes = [...new Set(lines.map(l => l.code))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    m.accounts = codes.map(code => {
+      const rs = all.filter(r => r.code === code);
+      return { code, name: names[code] || '', partners: rs.length, balance: rs.reduce((s, r) => s + r.total, 0), on: !c.exclude.includes(code) };
+    });
+    const on = new Set(m.accounts.filter(a => a.on).map(a => a.code));
+    m.multi = on.size > 1;
+    m.aged = all.filter(r => on.has(r.code));
+    m.base = m.aged.filter(r => r.total > 0);   // ECL is for customers who owe us; credit balances are left out
+    m.baseTotals = sumBands(m.base);
+
+    // History: one row per year-end from the start year to the current year.
+    const start = Math.min(+c.start || +year, +year);
+    m.hist = [];
+    for (let y = start; y <= +year; y++) {
+      const ys = String(y);
+      if (ys === year) { m.hist.push({ year: ys, src: 'current', v: m.baseTotals }); continue; }
+      const canGL = glFrom <= `${ys}-01-01`;
+      const h = c.hist[ys] || {};
+      const src = h.src || (canGL ? 'gl' : 'manual');
+      const v = src === 'gl'
+        ? sumBands(aging(m, `${ys}-12-31`).filter(r => on.has(r.code) && r.total > 0))
+        : (h.v || []).concat(new Array(NB).fill(0)).slice(0, NB).map(x => toInt(+x || 0));
+      m.hist.push({ year: ys, src, v, canGL });
+    }
+    m.avg = new Array(NB).fill(0).map((_, i) => m.hist.reduce((s, h) => s + h.v[i], 0) / m.hist.length);
+    const avgTot = m.avg.reduce((s, x) => s + x, 0);
+    m.share = m.avg.map(x => (avgTot ? x / avgTot : 0));
+    m.rates = { inf: +c.rates.inf || 0, ind: +c.rates.ind || 0, unemp: +c.rates.unemp || 0 };
+    m.maxRate = m.share[NB - 1] + (m.rates.inf + m.rates.ind + m.rates.unemp) / 100;
+    const wsum = WEIGHTS.reduce((s, x) => s + x, 0);
+    m.pct = WEIGHTS.map((w, i) => (i === NB - 1 ? 1 : (w / wsum) * m.maxRate));
+    m.ecl = m.baseTotals.map((x, i) => x * m.pct[i]);
+    m.eclTotal = m.ecl.reduce((s, x) => s + x, 0);
+
+    // Provision already recorded: the allowance account in an uploaded Trial Balance.
+    m.allowOptions = [];
+    for (const f of tbs) {
+      const bal = {};
+      if (f.kind === 'tb') for (const a of f.accounts) bal[a.code] = { name: a.name, cb: a.cb };
+      else for (const r of f.rows) { const b = bal[r.code] || (bal[r.code] = { name: f.names[r.code] || '', cb: 0 }); b.cb += r.net; }
+      const end = f.kind === 'tb' ? f.to : f.end;
+      for (const [code, b] of Object.entries(bal)) m.allowOptions.push({ id: f.id + '|' + code, code, name: b.name, cb: toInt(b.cb), end, file: f.name, guess: ALLOW_RE.test(b.name) });
+    }
+    const pick = m.allowOptions.find(o => o.id === c.allow) || m.allowOptions.find(o => o.code === c.allow.split('|')[1] && o.guess)
+      || m.allowOptions.find(o => o.guess && o.end === asOf) || m.allowOptions.find(o => o.guess);
+    m.allow = c.allow === 'manual' ? null : pick || null;
+    m.recorded = m.allow ? -m.allow.cb : toInt(+c.manualProv || 0);
+    m.required = m.eclTotal - m.recorded;
+
+    // Does the aging agree with the Trial Balance?
+    m.tbCheck = [];
+    for (const a of m.accounts.filter(x => x.on)) {
+      const o = m.allowOptions.find(x => x.code === a.code && x.end === asOf);
+      if (o) m.tbCheck.push({ code: a.code, aged: a.balance, tb: o.cb, ok: Math.abs(a.balance - o.cb) <= 1 });
+    }
+    return m;
+  }
+  const model = () => st.model || (st.model = build());
+
+  /* ---------- Files ---------- */
+  async function onFiles(list) {
+    st.error = '';
+    for (const file of [...list]) {
+      st.busy = file.name; App.rerender();
+      await new Promise(r => setTimeout(r, 30));
+      try {
+        if (/\.pdf$/i.test(file.name)) throw new Error(t('au_need_excel'));
+        const parsed = Audit.io.classify(await Audit.io.readBook(file));
+        st.files = st.files.filter(f => f.name !== file.name);
+        st.files.push(Object.assign({ id: U.uid(), name: file.name }, parsed));
+      } catch (e) { st.error = `${file.name}: ${e.message || e}`; }
+    }
+    st.busy = ''; st.model = null;
+    App.rerender();
+  }
+
+  /* ---------- Rendering ---------- */
+  const money = (v, m) => (Math.abs(v) >= 0.5 ? (v / m.UNIT).toLocaleString('en-US', { minimumFractionDigits: m.dec, maximumFractionDigits: m.dec }) : '');
+  const pctTxt = x => (x * 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%';
+  const accLabel = (m, code) => `${code} ${m.names[code] || ''}`.trim();
+  const rowLabel = (m, r) => (m.multi ? `${r.code} · ${pName(r.p)}` : pName(r.p));
+
+  function render() {
+    if (st.coId !== App.companyId) Object.assign(st, { coId: App.companyId, files: [], error: '', model: null });
+    const has = st.files.length > 0;
+    const m = has ? model() : null;
+    return `
+      <div class="card">
+        <h2 style="margin-top:0">${t('ecl_title')}</h2>
+        ${has ? renderFiles(m) : `
+          <div class="drop" id="eclDrop" tabindex="0" role="button">
+            <b>${t('au_drop')}</b><span class="muted">${t('ecl_drop_sub')}</span>
+          </div>
+          <ul class="muted small au-how">${['ecl_how1', 'ecl_how2', 'ecl_how3'].map(k => `<li>${t(k)}</li>`).join('')}</ul>`}
+        <input type="file" id="eclFile" accept=".xlsx,.xls,.csv" multiple hidden>
+      </div>
+      ${st.busy ? `<div class="card"><span class="spinner"></span> ${U.esc(t('reading', { f: st.busy }))}</div>` : ''}
+      ${st.error ? `<div class="notice bad">${U.esc(st.error)}</div>` : ''}
+      ${m && !m.empty ? renderSettings(m) + renderResult(m) : ''}`;
+  }
+
+  function renderFiles(m) {
+    const desc = f => (f.kind === 'gl' ? t('au_k_gl_d', { n: f.lines.length.toLocaleString('en-US'), a: fd(f.from), b: fd(f.to) })
+      : f.kind === 'tb' ? t('au_k_tb_d', { a: fd(f.from), b: fd(f.to), n: f.accounts.length }) : t('ecl_k_ours_d', { y: f.year }));
+    return `
+      ${st.files.map(f => `
+        <div class="list-item">
+          <span class="badge ${f.kind === 'gl' ? 'ok' : 'warn'}">${t(f.kind === 'gl' ? 'ecl_k_gl' : 'ecl_k_tb')}</span>
+          <b>${U.esc(f.name)}</b><span class="muted small">${U.esc(desc(f))}</span>
+          <span class="spacer"></span>
+          <button class="btn ghost sm" data-rm="${f.id}" type="button">${t('au_remove')}</button>
+        </div>`).join('')}
+      <div class="row" style="margin-top:10px">
+        <button class="btn ghost" id="eclAdd" type="button">${t('au_add')}</button>
+        <button class="btn ghost" id="eclReset" type="button">${t('au_reset')}</button>
+      </div>
+      ${m.empty ? `<div class="notice warn" style="margin-top:10px">${t('ecl_need_gl')}</div>` : ''}`;
+  }
+
+  function renderSettings(m) {
+    const c = cfg();
+    const opts = m.allowOptions.filter(o => o.guess || o.id === (m.allow && m.allow.id));
+    const others = m.allowOptions.filter(o => !opts.includes(o));
+    const opt = o => `<option value="${U.esc(o.id)}" ${m.allow && m.allow.id === o.id ? 'selected' : ''}>${U.esc(`${o.code} ${o.name} · ${money(-o.cb, m) || '0'} (${fd(o.end)})`)}</option>`;
+    return `
+      <div class="card">
+        <h2 style="margin-top:0">${t('ecl_setup')}</h2>
+        <div class="row" style="align-items:flex-end">
+          <label class="field">${t('ecl_asof')}
+            <select id="eclYear">${m.years.map(y => `<option value="${y}" ${y === m.year ? 'selected' : ''}>31/12/${y}</option>`).join('')}</select></label>
+          <label class="field">${t('ecl_start')}
+            <input id="eclStart" type="number" min="2000" max="${m.year}" value="${U.esc(c.start)}" style="width:100px"></label>
+          <label class="field">${t('ecl_inf')}<input data-rate="inf" type="number" step="0.01" value="${m.rates.inf}" style="width:90px"></label>
+          <label class="field">${t('ecl_ind')}<input data-rate="ind" type="number" step="0.01" value="${m.rates.ind}" style="width:90px"></label>
+          <label class="field">${t('ecl_unemp')}<input data-rate="unemp" type="number" step="0.01" value="${m.rates.unemp}" style="width:90px"></label>
+        </div>
+        <h3 style="margin:14px 0 6px">${t('ecl_accounts')}</h3>
+        <p class="muted small" style="margin:0 0 6px">${t('ecl_accounts_hint')}</p>
+        ${m.accounts.map(a => `
+          <label class="row" style="gap:8px;margin:4px 0">
+            <input type="checkbox" data-acc="${U.esc(a.code)}" ${a.on ? 'checked' : ''}>
+            <span dir="ltr">${U.esc(a.code)}</span> ${U.esc(a.name)}
+            <span class="muted small">${t('ecl_acc_meta', { n: a.partners, b: money(a.balance, m) || '0' })}</span>
+          </label>`).join('')}
+        <h3 style="margin:14px 0 6px">${t('ecl_recorded')}</h3>
+        <div class="row" style="align-items:flex-end">
+          <label class="field">${t('ecl_recorded_from')}
+            <select id="eclAllow" style="max-width:520px">
+              ${opts.map(opt).join('')}
+              ${others.length ? `<optgroup label="${U.esc(t('ecl_other_accounts'))}">${others.map(opt).join('')}</optgroup>` : ''}
+              <option value="manual" ${!m.allow ? 'selected' : ''}>${t('ecl_type_it')}</option>
+            </select></label>
+          ${!m.allow ? `<label class="field">${t('ecl_amount')}<input id="eclManual" type="number" step="any" value="${U.esc(c.manualProv)}" style="width:140px"></label>` : ''}
+        </div>
+        ${!m.allowOptions.length ? `<p class="muted small" style="margin:6px 0 0">${t('ecl_tb_hint')}</p>` : ''}
+      </div>`;
+  }
+
+  function renderResult(m) {
+    return `
+      <div class="card">
+        <div class="stats">
+          <div class="stat"><b>${money(m.aged.reduce((s, r) => s + r.total, 0), m) || '0'}</b><span>${t('ecl_s_aged')}</span></div>
+          <div class="stat"><b>${money(m.baseTotals.reduce((s, x) => s + x, 0), m) || '0'}</b><span>${t('ecl_s_base')}</span></div>
+          <div class="stat"><b>${money(m.eclTotal, m) || '0'}</b><span>${t('ecl_s_ecl')}</span></div>
+          <div class="stat"><b>${money(m.recorded, m) || '0'}</b><span>${t('ecl_s_recorded')}</span></div>
+          <div class="stat"><b>${money(m.required, m) || '0'}</b><span>${t(m.required >= 0 ? 'ecl_s_more' : 'ecl_s_less')}</span></div>
+        </div>
+        ${m.tbCheck.map(x => `<div class="notice ${x.ok ? 'ok' : 'bad'}">${x.ok ? '✓ ' + t('ecl_tb_ok', { a: accLabel(m, x.code) }) : t('ecl_tb_bad', { a: accLabel(m, x.code), x: money(x.aged, m) || '0', y: money(x.tb, m) || '0' })}</div>`).join('')}
+        <div class="row" style="margin:10px 0"><button class="btn" id="eclXlsx" type="button">${t('ecl_download')}</button></div>
+        <div class="tabs">${['aged', 'ecl'].map(k => `<button type="button" data-etab="${k}" class="${st.tab === k ? 'active' : ''}">${t('ecl_tab_' + k)}</button>`).join('')}</div>
+        ${st.tab === 'ecl' ? renderECL(m) : renderAged(m)}
+      </div>`;
+  }
+
+  const bandHead = () => `${Array.from({ length: NB }, (_, i) => `<th class="num">${bandLabel(i)}</th>`).join('')}<th class="num">${t('au_total')}</th>`;
+  const bandCells = (m, b, tot) => b.map(v => `<td class="num">${money(v, m)}</td>`).join('') + `<td class="num"><b>${money(tot, m) || '0'}</b></td>`;
+
+  function renderAged(m) {
+    const codes = [...new Set(m.aged.map(r => r.code))];
+    if (!codes.length) return `<p class="muted">${t('ecl_nothing')}</p>`;
+    return codes.map(code => {
+      const rs = m.aged.filter(r => r.code === code);
+      const tot = sumBands(rs);
+      return `
+        <h3 style="margin:14px 0 6px">${U.esc(accLabel(m, code))}</h3>
+        <div class="table-wrap ecl-wide"><table>
+          <thead><tr><th>${t('h_partner')}</th>${bandHead()}</tr></thead>
+          <tbody>${rs.map(r => `<tr class="${r.total < 0 ? 'ecl-credit' : ''}"><td>${U.esc(pName(r.p))}${r.total < 0 ? ` <span class="badge soon">${t('ecl_credit_bal')}</span>` : ''}</td>${bandCells(m, r.bands, r.total)}</tr>`).join('')}
+            <tr class="au-total"><td>${t('au_total')}</td>${bandCells(m, tot, tot.reduce((s, x) => s + x, 0))}</tr></tbody>
+        </table></div>`;
+    }).join('') + `<p class="muted small">${t('ecl_aged_hint')}</p>`;
+  }
+
+  function renderECL(m) {
+    const n = x => money(x, m);
+    const histRows = m.hist.map(h => `
+      <tr>
+        <td>${h.year}</td>
+        ${h.v.map((v, i) => `<td class="num">${h.src === 'manual'
+          ? `<input class="num" data-hist="${h.year}" data-i="${i}" value="${v ? (v / m.UNIT).toFixed(m.dec) : ''}" inputmode="decimal">` : n(v)}</td>`).join('')}
+        <td class="num"><b>${n(h.v.reduce((s, x) => s + x, 0)) || '0'}</b></td>
+        <td>${h.src === 'current' ? `<span class="muted small">${t('ecl_src_current')}</span>` : `
+          <select data-src="${h.year}">
+            ${h.canGL ? `<option value="gl" ${h.src === 'gl' ? 'selected' : ''}>${t('ecl_src_gl')}</option>` : ''}
+            <option value="manual" ${h.src === 'manual' ? 'selected' : ''}>${t('ecl_src_manual')}</option>
+          </select>`}</td>
+      </tr>`).join('');
+    return `
+      <h3 style="margin:14px 0 6px">${t('ecl_h_base')}</h3>
+      <div class="table-wrap ecl-wide"><table>
+        <thead><tr><th>${t('h_partner')}</th>${bandHead()}</tr></thead>
+        <tbody>${m.base.map(r => `<tr><td>${U.esc(rowLabel(m, r))}</td>${bandCells(m, r.bands, r.total)}</tr>`).join('')}
+          <tr class="au-total"><td>${t('au_total')}</td>${bandCells(m, m.baseTotals, m.baseTotals.reduce((s, x) => s + x, 0))}</tr></tbody>
+      </table></div>
+
+      <h3 style="margin:18px 0 6px">${t('ecl_h_hist')}</h3>
+      <p class="muted small" style="margin:0 0 6px">${t('ecl_hist_hint')}</p>
+      <div class="table-wrap ecl-wide ecl-hist"><table>
+        <thead><tr><th>${t('ecl_year')}</th>${bandHead()}<th>${t('ecl_source')}</th></tr></thead>
+        <tbody>${histRows}
+          <tr class="au-acc"><td>${t('ecl_avg')}</td>${m.avg.map(v => `<td class="num">${n(v)}</td>`).join('')}<td class="num">${n(m.avg.reduce((s, x) => s + x, 0))}</td><td></td></tr>
+          <tr class="au-acc"><td>${t('ecl_share')}</td>${m.share.map(v => `<td class="num">${pctTxt(v)}</td>`).join('')}<td class="num">${pctTxt(m.share.reduce((s, x) => s + x, 0))}</td><td></td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 style="margin:18px 0 6px">${t('ecl_h_matrix')}</h3>
+      <p class="small">${t('ecl_max_line', { s: pctTxt(m.share[NB - 1]), f: pctTxt((m.rates.inf + m.rates.ind + m.rates.unemp) / 100), r: pctTxt(m.maxRate) })}</p>
+      <div class="table-wrap ecl-wide"><table>
+        <thead><tr><th></th>${bandHead()}</tr></thead>
+        <tbody>
+          <tr><td>${t('ecl_months')}</td>${WEIGHTS.map(w => `<td class="num">${w}</td>`).join('')}<td class="num">${WEIGHTS.reduce((s, x) => s + x, 0)}</td></tr>
+          <tr><td>${t('ecl_pct')}</td>${m.pct.map(v => `<td class="num">${pctTxt(v)}</td>`).join('')}<td></td></tr>
+          <tr><td>${t('ecl_gross')}</td>${bandCells(m, m.baseTotals, m.baseTotals.reduce((s, x) => s + x, 0))}</tr>
+          <tr class="au-acc"><td>${t('ecl_required')}</td>${bandCells(m, m.ecl, m.eclTotal)}</tr>
+          <tr><td>${t('ecl_rec_row')}</td>${'<td></td>'.repeat(NB)}<td class="num">${n(m.recorded) || '0'}</td></tr>
+          <tr class="au-total"><td>${t(m.required >= 0 ? 'ecl_req_more' : 'ecl_req_less')}</td>${'<td></td>'.repeat(NB)}<td class="num">${n(m.required) || '0'}</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 style="margin:18px 0 6px">${t('ecl_h_partner')}</h3>
+      <div class="table-wrap ecl-wide"><table>
+        <thead><tr><th>${t('h_partner')}</th>${bandHead()}</tr></thead>
+        <tbody>${m.base.map(r => { const e = r.bands.map((v, i) => v * m.pct[i]); return `<tr><td>${U.esc(rowLabel(m, r))}</td>${bandCells(m, e, e.reduce((s, x) => s + x, 0))}</tr>`; }).join('')}
+          <tr class="au-total"><td>${t('au_total')}</td>${bandCells(m, m.ecl, m.eclTotal)}</tr></tbody>
+      </table></div>`;
+  }
+
+  /* ---------- Excel (live formulas, like the working sheet the auditor gets) ---------- */
+  function sheet() {
+    const ws = {}; let maxR = 0, maxC = 0;
+    const rows = [];
+    const put = (r, c, cell) => { if (!cell) return; ws[XLSX.utils.encode_cell({ r, c })] = cell; maxR = Math.max(maxR, r); maxC = Math.max(maxC, c); };
+    const s = (r, c, v) => put(r, c, v === '' || v == null ? null : { t: 's', v: String(v) });
+    const nv = (r, c, v, z) => put(r, c, { t: 'n', v, z });
+    const fm = (r, c, f, v, z) => put(r, c, typeof v === 'boolean' ? { t: 'b', v, f } : { t: 'n', v, f, z });
+    const done = (cols) => {
+      ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: maxC } });
+      ws['!cols'] = cols.map(w => ({ wch: w }));
+      ws['!rows'] = rows;
+      return ws;
+    };
+    return { ws, s, nv, fm, done, rows };
+  }
+  const col = c => XLSX.utils.encode_col(c);
+  const A1 = (r, c, abs) => (abs ? `$${col(c)}$${r + 1}` : `${col(c)}${r + 1}`);
+
+  function agedSheet(m) {
+    const S = sheet(), z = amtFmt(m), v = x => x / m.UNIT;
+    S.s(0, 0, t('ecl_aged_title')); S.s(0, 2, App.company().name);
+    S.s(1, 0, t('ecl_asof_x', { d: fd(m.asOf) }));
+    let r = 3;
+    S.s(r, 0, t('ecl_x_partner')); S.s(r, 1, t('h_date')); S.s(r, 2, t('h_label'));
+    for (let i = 0; i < NB; i++) S.s(r, 3 + i, bandLabel(i));
+    S.s(r, 3 + NB, t('au_total'));
+    r++;
+    const accTotals = [];
+    for (const code of [...new Set(m.aged.map(x => x.code))]) {
+      S.s(r, 0, accLabel(m, code)); r++;
+      const partnerRows = [];
+      for (const row of m.aged.filter(x => x.code === code)) {
+        const pr = r;
+        S.s(r, 0, pName(row.p));
+        partnerRows.push(pr);
+        r++;
+        for (const it of row.items) {
+          S.s(r, 0, it.move); S.s(r, 1, fd(it.date)); S.s(r, 2, it.label);
+          S.nv(r, 3 + it.band, v(it.amt), z);
+          S.fm(r, 3 + NB, `SUM(${A1(r, 3)}:${A1(r, 2 + NB)})`, v(it.amt), z);
+          S.rows[r] = { level: 1 };
+          r++;
+        }
+        for (let i = 0; i <= NB; i++) {
+          const c = 3 + i;
+          S.fm(pr, c, `SUM(${A1(pr + 1, c)}:${A1(r - 1, c)})`, v(i < NB ? row.bands[i] : row.total), z);
+        }
+      }
+      const tot = sumBands(m.aged.filter(x => x.code === code));
+      S.s(r, 0, `${t('au_total')} ${code}`);
+      for (let i = 0; i <= NB; i++) {
+        const c = 3 + i;
+        S.fm(r, c, partnerRows.map(pr => A1(pr, c)).join('+') || '0', v(i < NB ? tot[i] : tot.reduce((a, b) => a + b, 0)), z);
+      }
+      accTotals.push(r);
+      r += 2;
+    }
+    if (accTotals.length > 1) {
+      const all = sumBands(m.aged);
+      S.s(r, 0, t('au_total'));
+      for (let i = 0; i <= NB; i++) S.fm(r, 3 + i, accTotals.map(x => A1(x, 3 + i)).join('+'), v(i < NB ? all[i] : all.reduce((a, b) => a + b, 0)), z);
+    }
+    return S.done([46, 12, 50, 14, 14, 14, 14, 14, 14, 15]);
+  }
+
+  function amtFmt(m) { return m.dec ? `#,##0.${'0'.repeat(m.dec)};-#,##0.${'0'.repeat(m.dec)};"-"` : '#,##0;-#,##0;"-"'; }
+
+  function eclSheet(m) {
+    const S = sheet(), z = amtFmt(m), P = '0.00%', v = x => x / m.UNIT;
+    const B0 = 1, TOT = B0 + NB;                  // bands in columns B..G, total in H
+    const sumRow = r => `SUM(${A1(r, B0)}:${A1(r, B0 + NB - 1)})`;
+    const head = r => { for (let i = 0; i < NB; i++) S.s(r, B0 + i, bandLabel(i)); S.s(r, TOT, t('ecl_x_total')); };
+    S.s(0, 0, t('ecl_x_title')); S.s(0, 3, App.company().name);
+    S.s(1, 0, t('ecl_asof_x', { d: fd(m.asOf) }));
+    S.s(2, 0, t('ecl_x_accounts', { a: m.accounts.filter(a => a.on).map(a => accLabel(m, a.code)).join(', ') }));
+
+    // 1. Customers with a debit balance, by band.
+    let r = 4;
+    S.s(r, 0, t('ecl_x_partner')); head(r); r++;
+    const first = r;
+    for (const row of m.base) {
+      S.s(r, 0, rowLabel(m, row));
+      row.bands.forEach((x, i) => S.nv(r, B0 + i, v(x), z));
+      S.fm(r, TOT, sumRow(r), v(row.total), z);
+      row.xr = r; r++;
+    }
+    const T = r;
+    S.s(T, 0, t('au_total'));
+    for (let i = 0; i < NB; i++) S.fm(T, B0 + i, m.base.length ? `SUM(${A1(first, B0 + i)}:${A1(T - 1, B0 + i)})` : '0', v(m.baseTotals[i]), z);
+    S.fm(T, TOT, sumRow(T), v(m.baseTotals.reduce((a, b) => a + b, 0)), z);
+
+    // 2. History of year-end aging, average and share per band.
+    r = T + 2;
+    S.s(r, 0, t('ecl_year')); head(r); S.s(r, TOT + 1, t('ecl_source')); r++;
+    const h0 = r;
+    for (const h of m.hist) {
+      S.s(r, 0, h.year);
+      h.v.forEach((x, i) => (h.src === 'current' ? S.fm(r, B0 + i, A1(T, B0 + i), v(x), z) : S.nv(r, B0 + i, v(x), z)));
+      S.fm(r, TOT, sumRow(r), v(h.v.reduce((a, b) => a + b, 0)), z);
+      S.s(r, TOT + 1, t(h.src === 'current' ? 'ecl_src_current' : h.src === 'gl' ? 'ecl_src_gl' : 'ecl_src_manual'));
+      r++;
+    }
+    const AVG = r, SH = r + 1;
+    S.s(AVG, 0, t('ecl_avg'));
+    for (let i = 0; i < NB; i++) S.fm(AVG, B0 + i, `AVERAGE(${A1(h0, B0 + i)}:${A1(AVG - 1, B0 + i)})`, v(m.avg[i]), z);
+    S.fm(AVG, TOT, sumRow(AVG), v(m.avg.reduce((a, b) => a + b, 0)), z);
+    S.s(SH, 0, t('ecl_share'));
+    for (let i = 0; i < NB; i++) S.fm(SH, B0 + i, `IF(${A1(AVG, TOT, true)}=0,0,${A1(AVG, B0 + i)}/${A1(AVG, TOT, true)})`, m.share[i], P);
+    S.fm(SH, TOT, sumRow(SH), m.share.reduce((a, b) => a + b, 0), P);
+
+    // 3. Forward-looking assumptions.
+    r = SH + 2;
+    S.s(r, 0, t('ecl_x_forward')); r++;
+    const RI = r;
+    [['ecl_inf', m.rates.inf], ['ecl_ind', m.rates.ind], ['ecl_unemp', m.rates.unemp]].forEach(([k, x], j) => { S.s(RI + j, 0, t(k)); S.nv(RI + j, B0, x / 100, P); });
+
+    // 4. Provision matrix (Kuwait method).
+    r = RI + 4;
+    const MX = r, MO = r + 1, PC = r + 2, GR = r + 3, EC = r + 4, RC = r + 5, RQ = r + 6;
+    S.s(MX, 0, t('ecl_x_max'));
+    S.fm(MX, B0, `${A1(SH, B0 + NB - 1)}+${A1(RI, B0)}+${A1(RI + 1, B0)}+${A1(RI + 2, B0)}`, m.maxRate, P);
+    S.s(MO, 0, t('ecl_months')); WEIGHTS.forEach((w, i) => S.nv(MO, B0 + i, w)); S.fm(MO, TOT, sumRow(MO), WEIGHTS.reduce((a, b) => a + b, 0));
+    S.s(PC, 0, t('ecl_pct'));
+    for (let i = 0; i < NB - 1; i++) S.fm(PC, B0 + i, `${A1(MO, B0 + i)}/${A1(MO, TOT, true)}*${A1(MX, B0, true)}`, m.pct[i], P);
+    S.nv(PC, B0 + NB - 1, 1, P);
+    S.s(GR, 0, t('ecl_gross'));
+    for (let i = 0; i < NB; i++) S.fm(GR, B0 + i, A1(T, B0 + i), v(m.baseTotals[i]), z);
+    S.fm(GR, TOT, sumRow(GR), v(m.baseTotals.reduce((a, b) => a + b, 0)), z);
+    S.s(EC, 0, t('ecl_required'));
+    for (let i = 0; i < NB; i++) S.fm(EC, B0 + i, `${A1(GR, B0 + i)}*${A1(PC, B0 + i)}`, v(m.ecl[i]), z);
+    S.fm(EC, TOT, sumRow(EC), v(m.eclTotal), z);
+    S.s(RC, 0, t('ecl_rec_row')); S.nv(RC, TOT, v(m.recorded), z);
+    if (m.allow) S.s(RC, TOT + 1, `${m.allow.code} ${m.allow.name} (${m.allow.file})`);
+    S.s(RQ, 0, t('ecl_x_req')); S.fm(RQ, TOT, `${A1(EC, TOT)}-${A1(RC, TOT)}`, v(m.required), z);
+
+    // 5. ECL per customer.
+    r = RQ + 2;
+    S.s(r, 0, t('ecl_h_partner')); head(r); r++;
+    const p0 = r;
+    for (const row of m.base) {
+      S.s(r, 0, rowLabel(m, row));
+      for (let i = 0; i < NB; i++) S.fm(r, B0 + i, `${A1(row.xr, B0 + i)}*${A1(PC, B0 + i, true)}`, v(row.bands[i] * m.pct[i]), z);
+      S.fm(r, TOT, sumRow(r), v(row.bands.reduce((a, x, i) => a + x * m.pct[i], 0)), z);
+      r++;
+    }
+    const PT = r;
+    S.s(PT, 0, t('au_total'));
+    for (let i = 0; i <= NB; i++) {
+      const c = B0 + i;
+      S.fm(PT, c, m.base.length ? `SUM(${A1(p0, c)}:${A1(PT - 1, c)})` : '0', v(i < NB ? m.ecl[i] : m.eclTotal), z);
+    }
+    S.s(PT + 1, 0, t('ecl_check'));
+    for (let i = 0; i <= NB; i++) S.fm(PT + 1, B0 + i, `ROUND(${A1(PT, B0 + i)}-${A1(EC, B0 + i)},${m.dec})=0`, true);
+    return S.done([52, 15, 15, 15, 15, 15, 15, 16, 30]);
+  }
+
+  async function exportXlsx() {
+    const m = model();
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, agedSheet(m), t('ecl_tab_aged').slice(0, 31));
+    XLSX.utils.book_append_sheet(wb, eclSheet(m), t('ecl_tab_ecl').slice(0, 31));
+    const name = `Aged-AR-ECL-${U.safeName(App.company().name)}-${m.year}.xlsx`;
+    const res = await U.download(name, new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+    if (String(res).startsWith('unavailable')) {
+      const aoa = [[t('h_partner'), ...Array.from({ length: NB }, (_, i) => bandLabel(i)), t('au_total')],
+        ...m.base.map(r => [rowLabel(m, r), ...r.bands.map(x => x / m.UNIT), r.total / m.UNIT])];
+      U.copyDialog({ message: t('save_failed_msg'), text: U.toTSV(aoa), reason: String(res).split(':')[1] });
+    }
+  }
+
+  /* ---------- Events ---------- */
+  function mount(root) {
+    const q = sel => root.querySelector(sel);
+    const file = q('#eclFile'), drop = q('#eclDrop');
+    if (drop) U.dropZone(drop, file, onFiles);
+    else file.addEventListener('change', () => { if (file.files.length) onFiles(file.files); file.value = ''; });
+    const add = q('#eclAdd'); if (add) add.addEventListener('click', () => file.click());
+    const reset = q('#eclReset'); if (reset) reset.addEventListener('click', () => { Object.assign(st, { files: [], error: '', model: null }); App.rerender(); });
+    root.querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', () => { st.files = st.files.filter(f => f.id !== b.dataset.rm); st.model = null; App.rerender(); }));
+
+    const change = (el, fn) => el && el.addEventListener('change', () => { const c = cfg(); fn(c, el); saveCfg(c); App.rerender(); });
+    change(q('#eclYear'), (c, el) => { c.year = el.value; });
+    change(q('#eclStart'), (c, el) => { c.start = +el.value || 2022; });
+    root.querySelectorAll('[data-rate]').forEach(el => change(el, (c, e) => { c.rates = Object.assign({}, c.rates, { [e.dataset.rate]: +e.value || 0 }); }));
+    root.querySelectorAll('[data-acc]').forEach(el => change(el, (c, e) => {
+      const set = new Set(c.exclude); if (e.checked) set.delete(e.dataset.acc); else set.add(e.dataset.acc); c.exclude = [...set];
+    }));
+    change(q('#eclAllow'), (c, el) => { c.allow = el.value; });
+    change(q('#eclManual'), (c, el) => { c.manualProv = el.value; });
+    root.querySelectorAll('[data-src]').forEach(el => change(el, (c, e) => {
+      const y = e.dataset.src; c.hist = Object.assign({}, c.hist, { [y]: Object.assign({}, c.hist[y], { src: e.value }) });
+    }));
+    root.querySelectorAll('[data-hist]').forEach(el => change(el, (c, e) => {
+      const y = e.dataset.hist, h = Object.assign({ src: 'manual', v: [] }, c.hist[y]);
+      const vals = (h.v || []).concat(new Array(NB).fill(0)).slice(0, NB);
+      vals[+e.dataset.i] = U.parseNum(e.value) ? U.parseNum(e.value).v : 0;
+      c.hist = Object.assign({}, c.hist, { [y]: { src: 'manual', v: vals } });
+    }));
+    root.querySelectorAll('[data-etab]').forEach(b => b.addEventListener('click', () => { st.tab = b.dataset.etab; App.rerender(); }));
+    const xl = q('#eclXlsx'); if (xl) xl.addEventListener('click', exportXlsx);
+  }
+
+  return { render, mount, _onFiles: onFiles, _state: st, _model: () => model() };
+})();

@@ -228,3 +228,8 @@ details.card[open] > summary { margin-bottom: 12px; }
 .au-table table { min-width: 1150px; }
 .au-table tr.au-part td:nth-child(3) { min-width: 240px; }
 .au-table td[colspan] { min-width: 300px; }
+.au-reports { margin-bottom: 16px; }
+tr.ecl-credit td { color: var(--muted); }
+.ecl-hist td input.num { min-width: 90px; }
+.ecl-wide table { min-width: 980px; }
+.ecl-wide td:first-child, .ecl-wide th:first-child { min-width: 260px; }
