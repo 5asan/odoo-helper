@@ -44,16 +44,18 @@ const Indemnity = (() => {
     const cap = 18 * monthly;
     const capped = first + after > cap;
     const factor = factorOf(c.basis, years);
-    const ind = r(Math.min(first + after, cap) * factor, dec);
+    const gross = r(Math.min(first + after, cap) * factor, dec);
+    const paid = r(num(e.paid), dec);
+    const ind = r(Math.max(gross - paid, 0), dec);
     const prev = r(num(e.prev), dec);
-    return { ok: true, monthly, service, years, first, after, cap, capped, factor, ind, prev, move: r(ind - prev, dec) };
+    return { ok: true, monthly, service, years, first, after, cap, capped, factor, gross, paid, ind, prev, move: r(ind - prev, dec) };
   }
   function model() {
     const c = cfg();
     const rows = st.emps.map(e => ({ e, x: calc(e, c) }));
     const good = rows.filter(x => x.x.ok);
     const sum = k => r(good.reduce((s, x) => s + x.x[k], 0), +c.dec || 0);
-    return { c, date: asOf(c), rows, good, bad: rows.filter(x => !x.x.ok), total: sum('ind'), prev: sum('prev'), move: sum('move') };
+    return { c, date: asOf(c), rows, good, bad: rows.filter(x => !x.x.ok), gross: sum('gross'), paid: sum('paid'), total: sum('ind'), prev: sum('prev'), move: sum('move') };
   }
 
   /* ---------- Reading the employee file ---------- */
@@ -64,6 +66,7 @@ const Indemnity = (() => {
     basic: /basic|الراتب الأساسي|الأساسي/i,
     allow: /allowance|بدل|علاوات/i,
     unpaid: /unpaid|without pay|بدون راتب|غير مدفوعة/i,
+    paid: /advance|paid in advance|already paid|^paid|^received|المدفوع مقدم|مدفوعة مقدم|المصروف مقدم|سلف|المستلم/i,
     prev: /last provision|previous provision|opening provision|المخصص السابق|مخصص سابق/i,
     ind: /^(indemnity|eosi|end of service indemnity)\b(?!.*(part|year))|^(المكافأة|مكافأة نهاية الخدمة)$/i,
     asof: /^as at|^كما في/i,
@@ -74,7 +77,7 @@ const Indemnity = (() => {
       for (let i = 0; i < Math.min(rows.length, 30); i++) {
         const h = rows[i].map(x => x.replace(/\*/g, '').replace(/\s+/g, ' ').trim());
         const at = k => h.findIndex(x => x && COLS[k].test(x));
-        const ix = { code: at('code'), name: at('name'), join: at('join'), basic: at('basic'), allow: at('allow'), unpaid: at('unpaid'), prev: at('prev'), ind: at('ind') };
+        const ix = { code: at('code'), name: at('name'), join: at('join'), basic: at('basic'), allow: at('allow'), unpaid: at('unpaid'), paid: at('paid'), prev: at('prev'), ind: at('ind') };
         if (ix.name < 0 || ix.join < 0 || ix.basic < 0) continue;
         // "As at dd/mm/yyyy" in the title rows of our own export.
         let prevDate = '';
@@ -91,7 +94,7 @@ const Indemnity = (() => {
           const jv = val(row, 'join');
           const join = jv instanceof Date ? U.parseDate(jv) : typeof jv === 'number' && jv > 1000 && jv < 80000 ? new Date(Math.round((jv - 25569) * DAY)).toISOString().slice(0, 10) : U.parseDate(row[ix.join]);
           emps.push({ id: U.uid(), code: String(row[ix.code] || '').trim(), name, join: join || '',
-            basic: num(val(row, 'basic')), allow: num(val(row, 'allow')), unpaid: num(val(row, 'unpaid')),
+            basic: num(val(row, 'basic')), allow: num(val(row, 'allow')), unpaid: num(val(row, 'unpaid')), paid: num(val(row, 'paid')),
             prev: ix.ind >= 0 ? num(val(row, 'ind')) : num(val(row, 'prev')) });
         }
         return { emps, isPrev: ix.ind >= 0, prevDate };
@@ -174,7 +177,7 @@ const Indemnity = (() => {
       </div>`;
   }
 
-  const F = [['code', 'text'], ['name', 'text'], ['join', 'date'], ['basic', 'number'], ['allow', 'number'], ['unpaid', 'number'], ['prev', 'number']];
+  const F = [['code', 'text'], ['name', 'text'], ['join', 'date'], ['basic', 'number'], ['allow', 'number'], ['unpaid', 'number'], ['paid', 'number'], ['prev', 'number']];
   function renderForm(c) {
     const f = st.form;
     return `
@@ -203,6 +206,7 @@ const Indemnity = (() => {
       <div class="stat"><b>${money(x.after, dec)}</b><span>${t('eo_after5')}</span></div>
       ${x.capped ? `<div class="stat"><b>${money(x.cap, dec)}</b><span>${t('eo_capped')}</span></div>` : ''}
       ${x.factor !== 1 ? `<div class="stat"><b>${Math.round(x.factor * 1000) / 10}%</b><span>${t('eo_factor')}</span></div>` : ''}
+      ${x.paid ? `<div class="stat"><b>${money(x.gross, dec)}</b><span>${t('eo_gross')}</span></div><div class="stat"><b>(${money(x.paid, dec)})</b><span>${t('eo_f_paid')}</span></div>` : ''}
       <div class="stat"><b>${money(x.ind, dec)}</b><span>${t('eo_ind_at', { d: fd(asOf(c)) })}</span></div>
       ${x.prev ? `<div class="stat"><b>${money(x.move, dec)}</b><span>${t('eo_move')}</span></div>` : ''}
     </div>`;
@@ -227,18 +231,20 @@ const Indemnity = (() => {
         <div class="table-wrap ecl-wide"><table class="au-table">
           <thead><tr><th>${t('eo_f_code')}</th><th>${t('eo_f_name')}</th><th>${t('eo_f_join')}</th><th class="num">${t('eo_monthly')}</th>
             <th class="num">${t('eo_h_years')}</th><th class="num">${t('eo_first5')}</th><th class="num">${t('eo_after5')}</th>
+            <th class="num">${t('eo_gross')}</th><th class="num">${t('eo_f_paid')}</th>
             <th class="num">${t('eo_h_ind')}</th><th class="num">${t('eo_f_prev')}</th><th class="num">${t('eo_move')}</th><th></th></tr></thead>
           <tbody>${m.rows.map(({ e, x }) => `
             <tr class="${x.ok ? '' : 'ecl-credit'}">
               <td>${U.esc(e.code)}</td><td>${U.esc(e.name)}</td><td>${fd(e.join)}</td>
               ${x.ok ? `<td class="num">${money(x.monthly, dec)}</td><td class="num">${x.years.toFixed(3)}</td>
                 <td class="num">${money(x.first, dec)}</td><td class="num">${money(x.after, dec)}${x.capped ? ' ⚑' : ''}</td>
+                <td class="num">${money(x.gross, dec)}</td><td class="num">${money(x.paid, dec)}</td>
                 <td class="num"><b>${money(x.ind, dec)}</b></td><td class="num">${money(x.prev, dec)}</td><td class="num">${money(x.move, dec)}</td>`
-                : `<td colspan="7" class="muted">${t(x.err)}</td>`}
+                : `<td colspan="9" class="muted">${t(x.err)}</td>`}
               <td style="white-space:nowrap"><button class="btn ghost sm" data-edit="${e.id}" type="button">${t('eo_edit')}</button>
                 <button class="btn ghost sm" data-del="${e.id}" type="button">×</button></td>
             </tr>`).join('')}
-            <tr class="au-total"><td colspan="7">${t('au_total')}</td><td class="num">${money(m.total, dec)}</td><td class="num">${money(m.prev, dec)}</td><td class="num">${money(m.move, dec)}</td><td></td></tr>
+            <tr class="au-total"><td colspan="7">${t('au_total')}</td><td class="num">${money(m.gross, dec)}</td><td class="num">${money(m.paid, dec)}</td><td class="num">${money(m.total, dec)}</td><td class="num">${money(m.prev, dec)}</td><td class="num">${money(m.move, dec)}</td><td></td></tr>
           </tbody></table></div>
         ${m.good.some(x => x.x.capped) ? `<p class="muted small">⚑ ${t('eo_capped_note')}</p>` : ''}
       </div>`;
@@ -273,12 +279,12 @@ const Indemnity = (() => {
 
   /* ---------- Template ---------- */
   async function exportTemplate() {
-    const head = ['Employee Code', 'Employee Name *', 'Joining Date *', 'Basic Salary *', 'Allowances', 'Unpaid Leave Days', 'Last Provision'];
-    const help = [[t('eo_tpl_title')], [], ...['eo_tpl_1', 'eo_tpl_2', 'eo_tpl_3', 'eo_tpl_4', 'eo_tpl_5', 'eo_tpl_6', 'eo_tpl_7'].map(k => [t(k)])];
+    const head = ['Employee Code', 'Employee Name *', 'Joining Date *', 'Basic Salary *', 'Allowances', 'Unpaid Leave Days', 'Advance Paid', 'Last Provision'];
+    const help = [[t('eo_tpl_title')], [], ...['eo_tpl_1', 'eo_tpl_2', 'eo_tpl_3', 'eo_tpl_4', 'eo_tpl_8', 'eo_tpl_5', 'eo_tpl_6', 'eo_tpl_7'].map(k => [t(k)])];
     const X = window.XLSX;
     const wb = X.utils.book_new();
     const ws = X.utils.aoa_to_sheet([head]);
-    ws['!cols'] = [14, 32, 16, 14, 14, 16, 16].map(w => ({ wch: w }));
+    ws['!cols'] = [14, 32, 16, 14, 14, 16, 16, 16].map(w => ({ wch: w }));
     X.utils.book_append_sheet(wb, ws, 'Employees');
     const hs = X.utils.aoa_to_sheet(help); hs['!cols'] = [{ wch: 110 }];
     X.utils.book_append_sheet(wb, hs, 'Instructions');
@@ -301,7 +307,7 @@ const Indemnity = (() => {
       const zA = dec ? `#,##0.${'0'.repeat(dec)};(#,##0.${'0'.repeat(dec)});"-"` : '#,##0;(#,##0);"-"';
       const zD = 'dd/mm/yyyy', zY = '0.000';
       const xd = iso => dnum(iso) + 25569;     // Excel serial date
-      const LAST = 16;
+      const LAST = 18;
       s(0, 0, t('eo_x_title'), ST.title); merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: LAST } });
       s(1, 0, App.company().name, ST.company); merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: LAST } });
       s(2, 0, t('eo_x_asof', { d: fd(m.date) }), ST.sub); merges.push({ s: { r: 2, c: 0 }, e: { r: 2, c: LAST } });
@@ -314,7 +320,7 @@ const Indemnity = (() => {
       const D = A(4, 3, true), DAYS = A(5, 3, true), CAP = A(6, 3, true);
       const H = 9;
       const heads = ['#', t('eo_f_code'), t('eo_f_name'), t('eo_f_join'), t('eo_f_basic'), t('eo_f_allow'), t('eo_monthly'), t('eo_f_unpaid'),
-        t('eo_h_days'), t('eo_h_years'), t('eo_first5'), t('eo_after5'), t('eo_h_cap'), t('eo_factor'), t('eo_h_ind'), t('eo_f_prev'), t('eo_move')];
+        t('eo_h_days'), t('eo_h_years'), t('eo_first5'), t('eo_after5'), t('eo_h_cap'), t('eo_factor'), t('eo_gross'), t('eo_f_paid'), t('eo_h_ind'), t('eo_f_prev'), t('eo_move')];
       heads.forEach((h, i) => s(H, i, h, i === 2 ? ST.headL : ST.head));
       const rows = [];
       m.good.forEach(({ e, x }, i) => {
@@ -331,15 +337,17 @@ const Indemnity = (() => {
         const yr = A(rr, 9);
         if (c.basis === 'resign') f(rr, 13, `IF(${yr}<3,0,IF(${yr}<5,1/2,IF(${yr}<10,2/3,1)))`, x.factor, '0.0%', ST.cell);
         else n(rr, 13, 1, '0%', ST.cell);
-        f(rr, 14, `ROUND(MIN(${A(rr, 10)}+${A(rr, 11)},${A(rr, 12)})*${A(rr, 13)},${dec})`, x.ind, zA, ST.key);
-        n(rr, 15, x.prev, zA, ST.cell);
-        f(rr, 16, `${A(rr, 14)}-${A(rr, 15)}`, x.move, zA, ST.cell);
+        f(rr, 14, `ROUND(MIN(${A(rr, 10)}+${A(rr, 11)},${A(rr, 12)})*${A(rr, 13)},${dec})`, x.gross, zA, ST.cell);
+        n(rr, 15, x.paid, zA, ST.cell);
+        f(rr, 16, `MAX(0,${A(rr, 14)}-${A(rr, 15)})`, x.ind, zA, ST.key);
+        n(rr, 17, x.prev, zA, ST.cell);
+        f(rr, 18, `${A(rr, 16)}-${A(rr, 17)}`, x.move, zA, ST.cell);
       });
       const T = H + 1 + m.good.length;
       s(T, 0, t('au_total'), ST.total); for (let cc = 1; cc <= LAST; cc++) s(T, cc, '', ST.total);
       merges.push({ s: { r: T, c: 0 }, e: { r: T, c: 2 } });
       const sumC = (cc, v) => f(T, cc, rows.length ? `SUM(${A(H + 1, cc)}:${A(T - 1, cc)})` : '0', v, zA, ST.total);
-      sumC(14, m.total); sumC(15, m.prev); sumC(16, m.move);
+      sumC(14, m.gross); sumC(15, m.paid); sumC(16, m.total); sumC(17, m.prev); sumC(18, m.move);
       // Journal entries summary under the table.
       let rr = T + 3;
       s(rr, 0, t('eo_entries'), ST.section); rr++;
@@ -354,7 +362,7 @@ const Indemnity = (() => {
       rr += 2;
       ['eo_x_note1', 'eo_x_note2', 'eo_x_note3'].forEach(k => { s(rr, 0, t(k), ST.note); merges.push({ s: { r: rr, c: 0 }, e: { r: rr, c: LAST } }); rr++; });
       ws['!ref'] = X.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: LAST } });
-      ws['!cols'] = [5, 12, 30, 12, 12, 12, 13, 9, 10, 9, 14, 14, 14, 10, 15, 15, 14].map(w => ({ wch: w }));
+      ws['!cols'] = [5, 12, 30, 12, 12, 12, 13, 9, 10, 9, 14, 14, 14, 10, 15, 14, 15, 15, 14].map(w => ({ wch: w }));
       ws['!rows'] = Array.from({ length: maxR + 1 }, (_, i) => (i === H ? { hpt: 44 } : i === 0 ? { hpt: 24 } : {}));
       ws['!merges'] = merges;
       const wb = X.utils.book_new();
@@ -395,7 +403,7 @@ const Indemnity = (() => {
     q('#eoAdd').addEventListener('click', () => {
       const f = st.form, x = calc(f, cfg());
       if (!x.ok) { U.toast(t(x.err)); return; }
-      const e = { code: f.code || '', name: f.name, join: f.join, basic: +f.basic || 0, allow: +f.allow || 0, unpaid: +f.unpaid || 0, prev: +f.prev || 0 };
+      const e = { code: f.code || '', name: f.name, join: f.join, basic: +f.basic || 0, allow: +f.allow || 0, unpaid: +f.unpaid || 0, paid: +f.paid || 0, prev: +f.prev || 0 };
       const cur = st.emps.find(z => z.id === st.editId);
       if (cur) Object.assign(cur, e); else st.emps.push(Object.assign({ id: U.uid() }, e));
       st.form = {}; st.editId = null; App.rerender();
@@ -403,7 +411,7 @@ const Indemnity = (() => {
     const fc = q('#eoFormClear'); if (fc) fc.addEventListener('click', () => { st.form = {}; st.editId = null; App.rerender(); });
     root.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
       const e = st.emps.find(z => z.id === b.dataset.edit); if (!e) return;
-      st.form = { code: e.code, name: e.name, join: e.join, basic: e.basic, allow: e.allow || '', unpaid: e.unpaid || '', prev: e.prev || '' };
+      st.form = { code: e.code, name: e.name, join: e.join, basic: e.basic, allow: e.allow || '', unpaid: e.unpaid || '', paid: e.paid || '', prev: e.prev || '' };
       st.editId = e.id; App.rerender();
       const nm = document.querySelector('[data-ef="name"]'); if (nm) { nm.scrollIntoView({ block: 'center' }); nm.focus(); }
     }));
